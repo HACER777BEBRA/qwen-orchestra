@@ -9,8 +9,8 @@ alwaysApply: true
 
 ## Стек
 
-- SDK: `qwen_orchestra.Client` → `orchestra.handle` ← `router` + `selfcheck` + `llm` + `tools_web` + `tools_local` + `settings`
-- Цикл: `route → plan_worker_context → worker → selfcheck → retry` (до `MAX_ATTEMPTS`)
+- SDK: `qwen_orchestra.Client` → `orchestra.handle` ← `router` + `plan` + `selfcheck` + `llm` + `tools_web` + `tools_local` + `settings`
+- Цикл: `route → need_plan? → (planner → шаги → compose) | worker → selfcheck → retry` (до `MAX_ATTEMPTS`)
 - Веб: `server.py` (FastAPI, `127.0.0.1:8787`) + `web/` (чат + правая панель монитора)
 - Метрики: `qwen_orchestra.metrics` → `GET /api/metrics` (psutil, nvidia-smi + температуры, Ollama `/api/ps`)
 - UI Markdown/код/формулы: vendored `web/vendor/` — marked, DOMPurify, highlight.js, KaTeX (без npm/CDN)
@@ -28,7 +28,7 @@ alwaysApply: true
 Health ok при ≥1 доступной модели пула.
 Floor (код): tiny только приветствия/арифметика; иначе mid+; coder — отладка и крупный код; при отсутствии тира — `_fit_tier` к ближайшему доступному.
 Тексты для LLM-роутера — editable per-model `router_prompt` (не путать с `tier_floor`).
-Для Qwen3.5 в `llm.py` всегда `think: false` (роутер/tools/стрим без thinking).
+Для Qwen3.5 в `llm.py` всегда `think: false` (роутер/tools/стрим/планировщик без thinking).
 
 ## Контекст
 
@@ -39,6 +39,7 @@ Defaults по тиру: tiny/nano/small/mid = 300/200/100/50 (+ max 4096 у ме
 Приоритет: не обрезать запрос; затем минимум VRAM. История для сложных тиров — только по отсылкам. Логика — `plan_worker_context` в `orchestra.py`.
 Web-tools: кэш между retry, dedupe, лимит вызовов; `fetch_url` читает ограниченный объём байт.
 Local time: tiny `need_local_time` (без regex; любое упоминание времени/даты → true) → снимок часов ПК в system (`tools_local`).
+Calc: `need_calc` → план с неделимым блоком «Формула» + «Счёт ПК» (`calculate` на CPU). Минус только с пробелами. Без tools — предрасчёт или `CALCULATE:`.
 
 ## При изменениях
 
@@ -46,6 +47,8 @@ Local time: tiny `need_local_time` (без regex; любое упоминани�
 - Тексты «когда какую модель» для LLM-роутера — `settings.py` / UI (не дублировать в коде)
 - Размер окна / история — только в `plan_worker_context` (+ хелперы рядом)
 - Новые проверки ответа — только в `selfcheck.py` (код проблемы + `HINTS`); `refusal`/`uncertain` включаются/паттерны — `settings.selfcheck` (не хардкодить в оркестре)
+- Прямой счёт — `calc.py` (`need_calc`, tool `calculate`); не eval произвольного кода
+- Декомпозиция запроса — `plan.py` + `handle(allow_plan=…, on_plan_confirm=…)`; модель планировщика — `planner_model` в settings/UI; один вопрос / 1 шаг — не план; два независимых атомарных вопроса в одном сообщении — план; **расчёт** — всегда блок Формула+Счёт ПК; в вебе план и шаги — сворачиваемые окна (стрим пункта, склейка в теле); `on_token` — только склейка
 - Не дублировать оркестр в сервере; стрим через `on_token`/`on_status` + SSE
 - Публичный API для приложений — `qwen_orchestra.Client` (не плодить обходные импорты ядра без нужды)
 - По умолчанию `127.0.0.1`; `0.0.0.0` только через `--share` (опц. `--token`); не делать share дефолтом; не добавлять light-theme / полноценный multi-user / code-editor без запроса
@@ -53,5 +56,5 @@ Local time: tiny `need_local_time` (без regex; любое упоминани�
 - После правок лаунчера пересобрать `QwenChat.exe` (см. AGENTS.md)
 - Документацию держать в синхроне: `README.md` (обзор), `SETUP.md` (установка), `AGENTS.md`, `docs/SDK.md` (встраивание в другие проекты), этот файл
 - Публичный контракт для чужих ботов/агентов — только `docs/SDK.md` + `qwen_orchestra.Client` / `GenOptions`
-- Сэмплинг воркера — через `Client.ask(temperature=…, gen=…)` (не хардкодить в orchestra); роутер/selfcheck остаются temperature=0
+- Сэмплинг воркера — через `Client.ask(temperature=…, gen=…)` (не хардкодить в orchestra); роутер/планировщик/selfcheck остаются temperature=0
 - Ответы пользователю — на русском

@@ -390,6 +390,10 @@ input {
   line-height: 1.55;
 }
 
+.msg > .msg-body:empty {
+  display: none;
+}
+
 .msg-body .katex {
   font-size: 1.05em;
   color: var(--text);
@@ -664,6 +668,262 @@ input {
   font-size: 12px;
   color: var(--text-faint);
   padding: 4px 0;
+}
+
+.msg-plan-stack:empty,
+.msg-tools:empty {
+  display: none;
+}
+
+.msg-plan-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 4px;
+}
+
+.think-fold {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.think-fold-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  list-style: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.think-fold-head::-webkit-details-marker,
+.think-fold-head::marker {
+  display: none;
+  content: "";
+}
+
+.think-fold-head:hover {
+  background: var(--bg-hover);
+}
+
+.think-fold-chevron {
+  flex: 0 0 auto;
+  width: 1em;
+  color: var(--text-faint);
+  line-height: 1;
+}
+
+.think-fold-chevron::before {
+  content: "▸";
+  display: inline-block;
+  color: var(--text-dim);
+  transition: transform 0.15s ease;
+}
+
+.think-fold[open] .think-fold-chevron::before {
+  transform: rotate(90deg);
+}
+
+.think-fold-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.think-fold-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.think-fold-body {
+  padding: 0 10px 10px;
+  color: var(--text);
+}
+
+.think-fold.is-streaming[open] .think-fold-body {
+  max-height: 12.5em;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.think-fold[open]:not(.is-streaming) .think-fold-body {
+  max-height: 36em;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.think-fold-prompt {
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+  margin-bottom: 8px;
+}
+
+.think-fold-prompt[hidden],
+.think-fold-prompt:empty {
+  display: none;
+}
+
+.think-fold.is-streaming .think-fold-title {
+  color: var(--accent);
+}
+
+.think-fold.is-failed .think-fold-title {
+  color: var(--warn);
+}
+
+.plan-card {
+  margin: 8px 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.plan-card-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+
+.plan-card-goal {
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.plan-card-steps {
+  margin: 0 0 10px 1.1em;
+  padding: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.plan-card-steps li {
+  margin: 0 0 8px;
+}
+
+.plan-card-steps li.is-current .plan-step-title {
+  color: var(--text);
+}
+
+.plan-block-li {
+  list-style: none;
+  margin: 0 0 10px -1.1em;
+}
+
+.plan-block {
+  border-radius: 8px;
+  padding: 6px 8px 8px;
+}
+
+.plan-block-calc {
+  border: 1px solid #3d3428;
+  border-left: 3px solid var(--warn);
+  background: #181614;
+}
+
+.plan-block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--warn);
+}
+
+.plan-block-icon {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--warn);
+}
+
+.plan-block-title {
+  flex: 1 1 auto;
+}
+
+.plan-block-sub,
+.plan-block-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+
+.plan-block-sub {
+  list-style: decimal;
+  margin-left: 1.1em;
+}
+
+.plan-block-items .think-fold {
+  background: var(--bg);
+}
+
+.msg-plan-stack > .plan-block {
+  margin: 0;
+}
+
+.plan-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.plan-step-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.plan-step-prompt {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: pre-wrap;
+}
+
+.plan-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.plan-card-note {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.plan-card.is-rejected,
+.think-fold.plan-fold.is-rejected {
+  opacity: 0.75;
 }
 
 .msg.streaming .stream-caret {
@@ -973,8 +1233,13 @@ input {
 
 .router-model-row {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+
+.router-model-row > .field-with-label {
+  flex: 1 1 220px;
+  min-width: 0;
 }
 
 .selfcheck-settings {

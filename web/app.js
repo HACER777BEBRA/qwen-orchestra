@@ -20,11 +20,17 @@
     btnModelsHelp: $("#btn-models-help"),
     modelsHelp: $("#models-help"),
     routerModelSelect: $("#router-model-select"),
+    plannerModelSelect: $("#planner-model-select"),
     scFlagRefusal: $("#sc-flag-refusal"),
     scFlagUncertain: $("#sc-flag-uncertain"),
     scFlagIrrelevant: $("#sc-flag-irrelevant"),
     scRefusalPatterns: $("#sc-refusal-patterns"),
     scUncertainPatterns: $("#sc-uncertain-patterns"),
+    planEnabled: $("#plan-enabled"),
+    planMaxSteps: $("#plan-max-steps"),
+    planClassifierPrompt: $("#plan-classifier-prompt"),
+    planPlannerPrompt: $("#plan-planner-prompt"),
+    planComposerPrompt: $("#plan-composer-prompt"),
     btnModelsSave: $("#btn-models-save"),
     btnModelsAdd: $("#btn-models-add"),
     btnModelsReset: $("#btn-models-reset"),
@@ -72,7 +78,9 @@
     slots: [], // пул моделей (compat имя)
     fixedTiers: [],
     routerModel: "",
+    plannerModel: "",
     selfcheckDefaults: null,
+    planDefaults: null,
     panelOpen: true,
     panelWidth: PANEL_DEFAULT,
     metricsTimer: null,
@@ -988,14 +996,20 @@
   async function loadSettings() {
     const data = await api("/api/settings");
     state.routerModel = data.router_model || "";
+    state.plannerModel = data.planner_model || "";
     state.fixedTiers = data.fixed_tiers || [];
     state.selfcheckDefaults = (data.defaults && data.defaults.selfcheck) || null;
+    state.planDefaults = (data.defaults && data.defaults.plan) || null;
     fillSelfcheckForm(data.selfcheck, state.selfcheckDefaults);
+    fillPlanForm(data.plan, state.planDefaults);
     const pool = poolFromPayload(data);
     renderModelsList(pool);
     populateTierSelect(pool);
     fillModelSelect(els.addSlotModel, els.addSlotModel.value || "");
     fillModelSelect(els.routerModelSelect, state.routerModel);
+    if (els.plannerModelSelect) {
+      fillModelSelect(els.plannerModelSelect, state.plannerModel);
+    }
     fillTierSelect(els.addSlotTier, (els.addSlotTier && els.addSlotTier.value) || "");
     renderOpenRouterStatus(data.providers);
     syncAddProviderUi();
@@ -1079,6 +1093,62 @@
     };
   }
 
+  function fillPlanForm(plan, defaults) {
+    const cfg = plan || {};
+    const def = defaults || {};
+    if (els.planEnabled) {
+      els.planEnabled.checked = cfg.enabled !== false;
+    }
+    if (els.planMaxSteps) {
+      const n = Number(cfg.max_steps);
+      els.planMaxSteps.value = Number.isFinite(n) && n >= 1 ? String(n) : "4";
+    }
+    const fillPrompt = (el, effectiveKey, rawKey, usingKey) => {
+      if (!el) return;
+      el.value = cfg[effectiveKey] || cfg[rawKey] || def[rawKey] || "";
+      el.dataset.usingDefault = cfg[usingKey] ? "1" : "0";
+    };
+    fillPrompt(
+      els.planClassifierPrompt,
+      "classifier_prompt_effective",
+      "classifier_prompt",
+      "using_default_classifier_prompt"
+    );
+    fillPrompt(
+      els.planPlannerPrompt,
+      "planner_prompt_effective",
+      "planner_prompt",
+      "using_default_planner_prompt"
+    );
+    fillPrompt(
+      els.planComposerPrompt,
+      "composer_prompt_effective",
+      "composer_prompt",
+      "using_default_composer_prompt"
+    );
+  }
+
+  function collectPlanFromDom() {
+    const def = state.planDefaults || {};
+    const sameText = (a, b) => String(a || "").trim() === String(b || "").trim();
+    const pickPrompt = (el, defKey) => {
+      const val = el ? el.value : "";
+      return sameText(val, def[defKey] || "") ? null : val;
+    };
+    let maxSteps = 4;
+    if (els.planMaxSteps) {
+      const n = Number(els.planMaxSteps.value);
+      if (Number.isFinite(n)) maxSteps = Math.max(2, Math.min(6, Math.round(n)));
+    }
+    return {
+      enabled: !!(els.planEnabled && els.planEnabled.checked),
+      max_steps: maxSteps,
+      classifier_prompt: pickPrompt(els.planClassifierPrompt, "classifier_prompt"),
+      planner_prompt: pickPrompt(els.planPlannerPrompt, "planner_prompt"),
+      composer_prompt: pickPrompt(els.planComposerPrompt, "composer_prompt"),
+    };
+  }
+
   function toggleModelsHelp() {
     const open = els.modelsHelp.hidden;
     els.modelsHelp.hidden = !open;
@@ -1112,17 +1182,25 @@
         body: JSON.stringify({
           models,
           router_model: els.routerModelSelect.value || null,
+          planner_model: els.plannerModelSelect ? els.plannerModelSelect.value || null : null,
           selfcheck: collectSelfcheckFromDom(),
+          plan: collectPlanFromDom(),
         }),
       });
       state.routerModel = data.router_model || "";
+      state.plannerModel = data.planner_model || "";
       state.fixedTiers = data.fixed_tiers || state.fixedTiers;
       state.selfcheckDefaults = (data.defaults && data.defaults.selfcheck) || state.selfcheckDefaults;
+      state.planDefaults = (data.defaults && data.defaults.plan) || state.planDefaults;
       fillSelfcheckForm(data.selfcheck, state.selfcheckDefaults);
+      fillPlanForm(data.plan, state.planDefaults);
       const pool = poolFromPayload(data);
       renderModelsList(pool);
       populateTierSelect(pool);
       fillModelSelect(els.routerModelSelect, state.routerModel);
+      if (els.plannerModelSelect) {
+        fillModelSelect(els.plannerModelSelect, state.plannerModel);
+      }
       setModelsStatus("Сохранено", "ok");
       await refreshHealth();
     } catch (e) {
@@ -1138,7 +1216,9 @@
       body: JSON.stringify({
         models,
         router_model: els.routerModelSelect.value || null,
+        planner_model: els.plannerModelSelect ? els.plannerModelSelect.value || null : null,
         selfcheck: collectSelfcheckFromDom(),
+        plan: collectPlanFromDom(),
       }),
     });
   }
@@ -1190,11 +1270,15 @@
         body: JSON.stringify(body),
       });
       state.routerModel = data.router_model || state.routerModel;
+      state.plannerModel = data.planner_model || state.plannerModel;
       state.fixedTiers = data.fixed_tiers || state.fixedTiers;
       const pool = poolFromPayload(data);
       renderModelsList(pool);
       populateTierSelect(pool);
       fillModelSelect(els.routerModelSelect, state.routerModel);
+      if (els.plannerModelSelect) {
+        fillModelSelect(els.plannerModelSelect, state.plannerModel);
+      }
       renderOpenRouterStatus(data.providers);
       els.addSlotPrompt.value = "";
       els.addSlotModelOr.value = "";
@@ -1235,18 +1319,24 @@
   }
 
   async function resetModels() {
-    if (!confirm("Сбросить пул моделей, промпты и самопроверку к значениям по умолчанию?")) return;
+    if (!confirm("Сбросить пул моделей, промпты, самопроверку и план к значениям по умолчанию?")) return;
     setModelsStatus("Сброс…");
     try {
       const data = await api("/api/settings/reset", { method: "POST", body: "{}" });
       state.routerModel = data.router_model || "";
+      state.plannerModel = data.planner_model || "";
       state.fixedTiers = data.fixed_tiers || [];
       state.selfcheckDefaults = (data.defaults && data.defaults.selfcheck) || null;
+      state.planDefaults = (data.defaults && data.defaults.plan) || null;
       fillSelfcheckForm(data.selfcheck, state.selfcheckDefaults);
+      fillPlanForm(data.plan, state.planDefaults);
       const pool = poolFromPayload(data);
       renderModelsList(pool);
       populateTierSelect(pool);
       fillModelSelect(els.routerModelSelect, state.routerModel);
+      if (els.plannerModelSelect) {
+        fillModelSelect(els.plannerModelSelect, state.plannerModel);
+      }
       setModelsStatus("Сброшено к defaults", "ok");
       await refreshHealth();
     } catch (e) {
@@ -1361,6 +1451,13 @@
     if (meta.model) chips.push(`<span class="chip">${escapeHtml(meta.model)}</span>`);
     if (meta.need_web) chips.push(`<span class="chip">web</span>`);
     if (meta.need_local_time) chips.push(`<span class="chip">время ПК</span>`);
+    if (meta.need_calc) chips.push(`<span class="chip">счёт ПК</span>`);
+    if (meta.planned) {
+      const n = Array.isArray(meta.plan_steps) ? meta.plan_steps.length : 0;
+      chips.push(
+        `<span class="chip">${n ? `план: ${escapeHtml(n)} шагов` : "план"}</span>`
+      );
+    }
     if (meta.num_ctx) chips.push(`<span class="chip">ctx ${escapeHtml(meta.num_ctx)}</span>`);
     if (meta.used_history === false) chips.push(`<span class="chip">без истории</span>`);
     else if (meta.used_history === true) chips.push(`<span class="chip">история</span>`);
@@ -1380,11 +1477,13 @@
     wrap.className = "msg " + role + (streaming ? " streaming" : "");
     wrap.innerHTML = `
       <div class="msg-role">${role === "user" ? "You" : "Orchestra"}</div>
+      <div class="msg-plan-stack"></div>
       <div class="msg-body"></div>
       <div class="msg-tools"></div>
       <div class="msg-meta-slot"></div>
     `;
-    setMsgBody(wrap.querySelector(".msg-body"), content || "");
+    hydratePlanStack(wrap.querySelector(".msg-plan-stack"), meta);
+    if (content) setMsgBody(wrap.querySelector(":scope > .msg-body"), content);
     wrap.querySelector(".msg-meta-slot").innerHTML = metaChips(meta);
     els.messages.appendChild(wrap);
     els.messages.scrollTop = els.messages.scrollHeight;
@@ -1528,26 +1627,439 @@
     });
   }
 
+  function stepIdOf(data) {
+    if (data == null) return "";
+    if (data.id != null && data.id !== "") return String(data.id);
+    if (data.step_id != null && data.step_id !== "") return String(data.step_id);
+    if (data.index != null && data.index !== "") return String(data.index);
+    return "";
+  }
+
+  function setFoldOpen(fold, open) {
+    if (!fold) return;
+    fold.open = !!open;
+    const head = fold.querySelector(".think-fold-head");
+    if (head) head.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function attachFoldToggle(fold) {
+    const head = fold.querySelector(".think-fold-head");
+    if (!head) return;
+    head.setAttribute("aria-expanded", fold.open ? "true" : "false");
+    if (head.dataset.foldBound) return;
+    head.dataset.foldBound = "1";
+    fold.addEventListener("toggle", () => {
+      head.setAttribute("aria-expanded", fold.open ? "true" : "false");
+    });
+  }
+
+  function planHeadLabel(data, steps) {
+    const n = (steps || []).length;
+    const awaiting = data && data.awaiting;
+    const bits = ["План"];
+    if (n) bits.push(n === 1 ? "1 шаг" : n < 5 ? n + " шага" : n + " шагов");
+    if (awaiting) bits.push("утвердите");
+    return bits.join(" · ");
+  }
+
+  function planStepLi(s, i) {
+    const title = escapeHtml(s.title || `Шаг ${i + 1}`);
+    const prompt = s.prompt
+      ? `<div class="plan-step-prompt">${escapeHtml(s.prompt)}</div>`
+      : "";
+    const tier = s.tier_hint || s.tier
+      ? `<span class="chip">${escapeHtml(s.tier_hint || s.tier)}</span>`
+      : "";
+    const sid = escapeHtml(String(s.id != null ? s.id : i + 1));
+    const role = s.block_role
+      ? `<span class="chip">${escapeHtml(s.block_role === "cpu" ? "счёт ПК" : "формула")}</span>`
+      : "";
+    return `<li data-step-id="${sid}"><div class="plan-step-head"><span class="plan-step-title">${title}</span>${tier}${role}</div>${prompt}</li>`;
+  }
+
+  function renderPlanStepsHtml(steps) {
+    const list = steps || [];
+    let html = "";
+    let i = 0;
+    while (i < list.length) {
+      const s = list[i];
+      if (s && s.block === "calc") {
+        const group = [];
+        while (i < list.length && list[i] && list[i].block === "calc") {
+          group.push(list[i]);
+          i += 1;
+        }
+        const title = escapeHtml((group[0] && group[0].block_title) || "Расчёт");
+        html += `<li class="plan-block-li">
+          <div class="plan-block plan-block-calc">
+            <div class="plan-block-head">
+              <span class="plan-block-icon" aria-hidden="true">ƒx</span>
+              <span class="plan-block-title">${title}</span>
+              <span class="chip">формула → счёт ПК</span>
+            </div>
+            <ol class="plan-block-sub">${group.map((g, gi) => planStepLi(g, gi)).join("")}</ol>
+          </div>
+        </li>`;
+        continue;
+      }
+      html += planStepLi(s, i);
+      i += 1;
+    }
+    return html;
+  }
+
+  function renderPlanFold(host, data, { open = true, live = false } = {}) {
+    const steps = Array.isArray(data.steps) ? data.steps : Array.isArray(data.plan_steps) ? data.plan_steps : [];
+    const fold = document.createElement("details");
+    fold.className = "think-fold plan-fold";
+    const goal = data.goal || data.plan_goal
+      ? `<div class="plan-card-goal">${escapeHtml(data.goal || data.plan_goal)}</div>`
+      : "";
+    const actions = live
+      ? `<div class="plan-card-actions">
+        <button type="button" class="btn btn-send" data-plan-action="approve">Выполнить план</button>
+        <button type="button" class="btn btn-ghost" data-plan-action="reject">Ответить без плана</button>
+      </div>`
+      : "";
+    fold.innerHTML = `
+      <summary class="think-fold-head">
+        <span class="think-fold-chevron" aria-hidden="true"></span>
+        <span class="think-fold-title">${escapeHtml(planHeadLabel(data, steps))}</span>
+      </summary>
+      <div class="think-fold-body">
+        ${goal}
+        <ol class="plan-card-steps">${renderPlanStepsHtml(steps)}</ol>
+        ${actions}
+      </div>
+    `;
+    fold.open = !!open;
+    attachFoldToggle(fold);
+    host.appendChild(fold);
+    return fold;
+  }
+
+  function hydratePlanStack(stackEl, meta) {
+    if (!stackEl || !meta || !meta.planned) return;
+    const steps = Array.isArray(meta.plan_steps) ? meta.plan_steps : [];
+    if (!steps.length && !meta.plan_goal) return;
+    renderPlanFold(stackEl, { goal: meta.plan_goal, steps, awaiting: false }, { open: false });
+    steps.forEach((s, i) => {
+      const rec = buildStepFold(stackEl, {
+        id: s.id != null ? s.id : i + 1,
+        index: i + 1,
+        title: s.title,
+        tier: s.tier,
+        model: s.model,
+        prompt: s.prompt,
+        block: s.block,
+        block_title: s.block_title,
+        block_role: s.block_role,
+      });
+      rec.el.classList.remove("is-streaming");
+      setFoldOpen(rec.el, false);
+      if (s.failed) rec.el.classList.add("is-failed");
+      if (s.text) setMsgBody(rec.answerEl, s.text);
+      if (s.note) {
+        const line = document.createElement("div");
+        line.className = "tool-line";
+        line.textContent = s.note;
+        rec.chainEl.appendChild(line);
+      }
+    });
+  }
+
+  function calcBlockHost(host, data) {
+    const bid = (data && data.block) || "";
+    if (bid !== "calc" || !host) return host;
+    const key = String(bid);
+    let box = host.querySelector(`.plan-block[data-block="${key}"]`);
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "plan-block plan-block-calc";
+      box.dataset.block = key;
+      const title = escapeHtml((data && data.block_title) || "Расчёт");
+      box.innerHTML = `
+        <div class="plan-block-head">
+          <span class="plan-block-icon" aria-hidden="true">ƒx</span>
+          <span class="plan-block-title">${title}</span>
+          <span class="chip">формула → счёт ПК</span>
+        </div>
+        <div class="plan-block-items"></div>
+      `;
+      host.appendChild(box);
+    }
+    return box.querySelector(".plan-block-items") || host;
+  }
+
+  function buildStepFold(host, data) {
+    const sid = stepIdOf(data) || "1";
+    const fold = document.createElement("details");
+    fold.className = "think-fold step-fold is-streaming";
+    fold.dataset.stepId = sid;
+    const title = data.title || `Шаг ${data.index || sid}`;
+    const idx = data.index != null ? data.index : sid;
+    const chips = [];
+    if (data.tier) chips.push(`<span class="chip">${escapeHtml(String(data.tier))}</span>`);
+    if (data.model) chips.push(`<span class="chip">${escapeHtml(String(data.model))}</span>`);
+    const prompt = data.prompt
+      ? `<div class="think-fold-prompt">${escapeHtml(data.prompt)}</div>`
+      : `<div class="think-fold-prompt" hidden></div>`;
+    fold.innerHTML = `
+      <summary class="think-fold-head">
+        <span class="think-fold-chevron" aria-hidden="true"></span>
+        <span class="think-fold-title">${escapeHtml(`${idx}. ${title}`)}</span>
+        <span class="think-fold-chips">${chips.join("")}</span>
+      </summary>
+      <div class="think-fold-body">
+        ${prompt}
+        <div class="think-fold-chain"></div>
+        <div class="msg-body think-fold-md"></div>
+      </div>
+    `;
+    fold.open = true;
+    attachFoldToggle(fold);
+    calcBlockHost(host, data).appendChild(fold);
+    return {
+      el: fold,
+      answerEl: fold.querySelector(".think-fold-md"),
+      chainEl: fold.querySelector(".think-fold-chain"),
+      promptEl: fold.querySelector(".think-fold-prompt"),
+      chipsEl: fold.querySelector(".think-fold-chips"),
+      titleEl: fold.querySelector(".think-fold-title"),
+      bodyEl: fold.querySelector(".think-fold-body"),
+      full: "",
+      _raf: 0,
+    };
+  }
+
+  function promptForStep(ctx, sid) {
+    const steps = (ctx.liveMeta && ctx.liveMeta.plan_steps) || [];
+    const hit = steps.find((s) => String(s.id != null ? s.id : "") === String(sid));
+    return hit && hit.prompt ? hit.prompt : "";
+  }
+
+  function stepMeta(ctx, sid) {
+    const steps = (ctx.liveMeta && ctx.liveMeta.plan_steps) || [];
+    return steps.find((s) => String(s.id != null ? s.id : "") === String(sid)) || {};
+  }
+
+  function ensureStepFold(ctx, data) {
+    const sid = stepIdOf(data);
+    if (sid && ctx.stepFolds[sid]) return ctx.stepFolds[sid];
+    const meta = stepMeta(ctx, sid);
+    const rec = buildStepFold(ctx.planStackEl, {
+      ...meta,
+      ...data,
+      prompt: data.prompt || meta.prompt || promptForStep(ctx, sid),
+    });
+    ctx.stepFolds[sid] = rec;
+    ctx.activeStepId = sid;
+    return rec;
+  }
+
+  function stepRecFor(ctx, data) {
+    const sid = stepIdOf(data) || ctx.activeStepId;
+    if (sid && ctx.stepFolds[sid]) return ctx.stepFolds[sid];
+    if (ctx.activeStepId && ctx.stepFolds[ctx.activeStepId]) {
+      return ctx.stepFolds[ctx.activeStepId];
+    }
+    return null;
+  }
+
+  function flushStepRender(rec, { streaming = false } = {}) {
+    if (!rec) return;
+    if (rec._raf) {
+      cancelAnimationFrame(rec._raf);
+      rec._raf = 0;
+    }
+    setMsgBody(rec.answerEl, rec.full, { streaming });
+    if (rec.bodyEl && streaming) rec.bodyEl.scrollTop = rec.bodyEl.scrollHeight;
+    els.messages.scrollTop = els.messages.scrollHeight;
+  }
+
+  function scheduleStepRender(rec) {
+    if (!rec || rec._raf) return;
+    rec._raf = requestAnimationFrame(() => {
+      rec._raf = 0;
+      setMsgBody(rec.answerEl, rec.full, { streaming: true });
+      if (rec.bodyEl) rec.bodyEl.scrollTop = rec.bodyEl.scrollHeight;
+      els.messages.scrollTop = els.messages.scrollHeight;
+    });
+  }
+
+  function appendChainLine(host, text) {
+    if (!host || !text) return;
+    const line = document.createElement("div");
+    line.className = "tool-line";
+    line.textContent = text;
+    host.appendChild(line);
+  }
+
+  function chainHost(ctx, data) {
+    const rec = stepRecFor(ctx, data);
+    if (rec) return rec.chainEl;
+    return ctx.toolsEl;
+  }
+
+  function updateStepChips(rec, data) {
+    if (!rec || !rec.chipsEl) return;
+    const chips = [];
+    if (data.tier) chips.push(`<span class="chip">${escapeHtml(String(data.tier))}</span>`);
+    if (data.model) chips.push(`<span class="chip">${escapeHtml(String(data.model))}</span>`);
+    if (chips.length) rec.chipsEl.innerHTML = chips.join("");
+  }
+
+  function finishStepFold(ctx, data) {
+    const rec = stepRecFor(ctx, data);
+    if (!rec) return;
+    if (data.text && data.text.length >= (rec.full || "").length) {
+      rec.full = data.text;
+    }
+    rec.el.classList.remove("is-streaming");
+    setFoldOpen(rec.el, false);
+    if (data.failed) rec.el.classList.add("is-failed");
+    if (data.note) appendChainLine(rec.chainEl, data.note);
+    updateStepChips(rec, data);
+    flushStepRender(rec, { streaming: false });
+  }
+
+  function renderPlanCard(ctx, data) {
+    const fold = renderPlanFold(ctx.planStackEl, { ...data, awaiting: true }, { open: true, live: true });
+    fold.querySelectorAll("[data-plan-action]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        submitPlanAction(ctx, btn.getAttribute("data-plan-action"));
+      });
+    });
+    ctx.planCard = fold;
+  }
+
+  async function submitPlanAction(ctx, action) {
+    if (!ctx.chatId || ctx.planDecided) return;
+    ctx.planDecided = true;
+    const buttons = ctx.planCard ? ctx.planCard.querySelectorAll("[data-plan-action]") : [];
+    buttons.forEach((b) => {
+      b.disabled = true;
+    });
+    try {
+      await api(`/api/chats/${ctx.chatId}/plan`, {
+        method: "POST",
+        body: JSON.stringify({ action }),
+      });
+    } catch (e) {
+      ctx.planDecided = false;
+      buttons.forEach((b) => {
+        b.disabled = false;
+      });
+      els.statusLine.textContent = "План: " + (e.message || "ошибка");
+    }
+  }
+
   function applySseEvent(event, data, ctx) {
     const { toolsEl, metaSlot } = ctx;
     if (event === "meta") {
-      if (data.phase === "retry" || data.phase === "restore") {
+      const stepScope = data.scope === "step";
+      if ((data.phase === "retry" || data.phase === "restore") && !stepScope) {
         ctx.full = "";
         flushBodyRender(ctx, { streaming: true });
       }
-      if (data.phase === "retry" && data.problems && data.problems.length) {
-        const line = document.createElement("div");
-        line.className = "tool-line";
-        line.textContent = `повтор (${data.problems.join(", ")}) → ${data.model || ""}`;
-        toolsEl.appendChild(line);
+      if (data.phase === "retry" && data.problems && data.problems.length && !stepScope) {
+        appendChainLine(toolsEl, `повтор (${data.problems.join(", ")}) → ${data.model || ""}`);
       }
-      if (data.phase === "restore") {
+      if (data.phase === "retry" && stepScope) {
+        const rec = stepRecFor(ctx, data);
+        if (rec) {
+          rec.full = "";
+          rec.el.classList.add("is-streaming");
+          setFoldOpen(rec.el, true);
+          appendChainLine(
+            rec.chainEl,
+            `повтор (${(data.problems || []).join(", ")}) → ${data.model || ""}`
+          );
+          flushStepRender(rec, { streaming: true });
+        }
+      }
+      if (data.phase === "restore" && !stepScope) {
         ctx.liveMeta = { ...ctx.liveMeta, ...data, problems: [] };
-        const line = document.createElement("div");
-        line.className = "tool-line";
-        line.textContent = `восстановлен лучший ответ (${data.model || ""})`;
-        toolsEl.appendChild(line);
-      } else {
+        appendChainLine(toolsEl, `восстановлен лучший ответ (${data.model || ""})`);
+      } else if (data.phase === "restore" && stepScope) {
+        const rec = stepRecFor(ctx, data);
+        if (rec) {
+          rec.full = "";
+          rec.el.classList.add("is-streaming");
+          setFoldOpen(rec.el, true);
+          appendChainLine(rec.chainEl, `восстановлен лучший ответ (${data.model || ""})`);
+          flushStepRender(rec, { streaming: true });
+        }
+      } else if (data.phase === "plan_ready") {
+        const steps = Array.isArray(data.steps) ? data.steps : [];
+        ctx.liveMeta = {
+          ...ctx.liveMeta,
+          planned: true,
+          plan_goal: data.goal || "",
+          plan_steps: steps,
+        };
+        renderPlanCard(ctx, data);
+      } else if (data.phase === "plan_accepted") {
+        if (ctx.planCard) {
+          ctx.planCard.classList.add("is-running");
+          const actions = ctx.planCard.querySelector(".plan-card-actions");
+          if (actions) actions.remove();
+          const titleEl = ctx.planCard.querySelector(".think-fold-title");
+          if (titleEl) {
+            titleEl.textContent = planHeadLabel(
+              { awaiting: false },
+              (ctx.liveMeta && ctx.liveMeta.plan_steps) || []
+            );
+          }
+          setFoldOpen(ctx.planCard, false);
+        }
+      } else if (data.phase === "plan_rejected") {
+        ctx.liveMeta = { ...ctx.liveMeta, planned: false };
+        if (ctx.planCard) {
+          ctx.planCard.classList.add("is-rejected");
+          const actions = ctx.planCard.querySelector(".plan-card-actions");
+          if (actions) actions.remove();
+          const note = document.createElement("div");
+          note.className = "plan-card-note";
+          note.textContent = "План отклонён — один ответ";
+          const body = ctx.planCard.querySelector(".think-fold-body");
+          if (body) body.appendChild(note);
+          else ctx.planCard.appendChild(note);
+          setFoldOpen(ctx.planCard, false);
+        }
+      } else if (data.phase === "plan_step") {
+        if (ctx.planCard) {
+          ctx.planCard.querySelectorAll("li.is-current").forEach((el) => {
+            el.classList.remove("is-current");
+          });
+          const sid = stepIdOf(data);
+          const li = ctx.planCard.querySelector(`li[data-step-id="${sid}"]`);
+          if (li) li.classList.add("is-current");
+        }
+        const rec = ensureStepFold(ctx, data);
+        rec.el.classList.add("is-streaming");
+        setFoldOpen(rec.el, true);
+        updateStepChips(rec, data);
+      } else if (data.phase === "plan_step_done") {
+        finishStepFold(ctx, data);
+      } else if (data.phase === "compose") {
+        ctx.liveMeta = { ...ctx.liveMeta, ...data, planned: true };
+        Object.values(ctx.stepFolds || {}).forEach((rec) => {
+          if (rec.el.classList.contains("is-streaming")) {
+            rec.el.classList.remove("is-streaming");
+            setFoldOpen(rec.el, false);
+            flushStepRender(rec, { streaming: false });
+          }
+        });
+        if (ctx.planCard) setFoldOpen(ctx.planCard, false);
+      } else if (data.phase === "plan") {
+        ctx.liveMeta = { ...ctx.liveMeta, ...data };
+      } else if (stepScope) {
+        const rec = stepRecFor(ctx, data);
+        if (rec && (data.model || data.tier)) updateStepChips(rec, data);
+      } else if (!stepScope) {
         ctx.liveMeta = { ...ctx.liveMeta, ...data };
       }
       metaSlot.innerHTML = metaChips(ctx.liveMeta);
@@ -1556,13 +2068,32 @@
       if (ctx.liveMeta.model) bits.push(ctx.liveMeta.model);
       if (ctx.liveMeta.need_web) bits.push("web");
       if (ctx.liveMeta.need_local_time) bits.push("время ПК");
+      if (ctx.liveMeta.need_calc) bits.push("счёт ПК");
+      if (ctx.liveMeta.planned && Array.isArray(ctx.liveMeta.plan_steps) && ctx.liveMeta.plan_steps.length) {
+        bits.push("план: " + ctx.liveMeta.plan_steps.length + " шагов");
+      }
       if (ctx.liveMeta.num_ctx) bits.push("ctx " + ctx.liveMeta.num_ctx);
       if (ctx.liveMeta.used_history === false) bits.push("без истории");
       if (data.phase === "retry") bits.push("повтор");
       else if (data.phase === "restore") bits.push("restore");
+      else if (data.phase === "plan_ready") bits.push("утвердите план");
+      else if (data.phase === "plan_accepted") bits.push("план");
+      else if (data.phase === "plan_rejected") bits.push("без плана");
+      else if (data.phase === "plan_step") bits.push("шаг " + (data.index || ""));
+      else if (data.phase === "plan_step_done") bits.push("шаг готов");
+      else if (data.phase === "compose") bits.push("сборка");
       else if (ctx.liveMeta.escalated) bits.push("escalate");
       els.statusLine.textContent = bits.join(" · ") || "Генерация…";
     } else if (event === "check") {
+      if (data.scope === "step") {
+        if (!data.ok) {
+          appendChainLine(
+            chainHost(ctx, data),
+            `self-check: ${(data.problems || []).join(", ")}${data.note ? " — " + data.note : ""}`
+          );
+        }
+        return;
+      }
       ctx.liveMeta = {
         ...ctx.liveMeta,
         checked: data.checked != null ? !!data.checked : false,
@@ -1570,24 +2101,27 @@
       };
       metaSlot.innerHTML = metaChips(ctx.liveMeta);
       if (!data.ok) {
-        const line = document.createElement("div");
-        line.className = "tool-line";
-        const note = data.note ? ` — ${data.note}` : "";
-        line.textContent = `self-check: ${(data.problems || []).join(", ")}${note}`;
-        toolsEl.appendChild(line);
+        appendChainLine(
+          toolsEl,
+          `self-check: ${(data.problems || []).join(", ")}${data.note ? " — " + data.note : ""}`
+        );
       }
     } else if (event === "token") {
-      ctx.full += data.text || "";
-      scheduleBodyRender(ctx);
+      if (data.scope === "step") {
+        const rec = stepRecFor(ctx, data) || ensureStepFold(ctx, data);
+        rec.el.classList.add("is-streaming");
+        rec.full += data.text || "";
+        scheduleStepRender(rec);
+      } else {
+        ctx.full += data.text || "";
+        scheduleBodyRender(ctx);
+      }
     } else if (event === "tool") {
-      const line = document.createElement("div");
-      line.className = "tool-line";
       const args =
         typeof data.arguments === "string"
           ? data.arguments
           : JSON.stringify(data.arguments || {});
-      line.textContent = `tool ${data.name}(${args})`;
-      toolsEl.appendChild(line);
+      appendChainLine(chainHost(ctx, data), `tool ${data.name}(${args})`);
     } else if (event === "done") {
       ctx.doneReceived = true;
       ctx.liveMeta = {
@@ -1595,6 +2129,7 @@
         model: data.model,
         need_web: data.need_web,
         need_local_time: data.need_local_time,
+        need_calc: data.need_calc,
         route_reason: data.route_reason,
         escalated: data.escalated,
         attempts: data.attempts,
@@ -1603,10 +2138,19 @@
         num_ctx: data.num_ctx,
         used_history: data.used_history,
         context_reason: data.context_reason,
+        planned: !!data.planned,
+        plan_goal: data.plan_goal || ctx.liveMeta.plan_goal || "",
+        plan_steps: data.plan_steps || [],
       };
       if (data.text) {
         ctx.full = data.text;
       }
+      Object.values(ctx.stepFolds || {}).forEach((rec) => {
+        rec.el.classList.remove("is-streaming");
+        setFoldOpen(rec.el, false);
+        flushStepRender(rec, { streaming: false });
+      });
+      if (ctx.planCard) setFoldOpen(ctx.planCard, false);
       flushBodyRender(ctx, { streaming: false });
       metaSlot.innerHTML = metaChips(ctx.liveMeta);
       els.statusLine.textContent = [
@@ -1614,6 +2158,10 @@
         data.model,
         data.need_web ? "web" : null,
         data.need_local_time ? "время ПК" : null,
+        data.need_calc ? "счёт ПК" : null,
+        data.planned && data.plan_steps && data.plan_steps.length
+          ? `план: ${data.plan_steps.length} шагов`
+          : null,
         data.num_ctx ? `ctx ${data.num_ctx}` : null,
         data.used_history === false ? "без истории" : null,
         data.escalated ? "escalated" : null,
@@ -1642,6 +2190,10 @@
       bodyEl: null,
       toolsEl: null,
       metaSlot: null,
+      planStackEl: null,
+      planCard: null,
+      stepFolds: {},
+      activeStepId: null,
       doneReceived: false,
     };
 
@@ -1652,9 +2204,11 @@
       appendMessage("user", text);
 
       asst = appendMessage("assistant", "", null, { streaming: true });
-      ctx.bodyEl = asst.querySelector(".msg-body");
+      ctx.bodyEl = asst.querySelector(":scope > .msg-body");
       ctx.toolsEl = asst.querySelector(".msg-tools");
       ctx.metaSlot = asst.querySelector(".msg-meta-slot");
+      ctx.planStackEl = asst.querySelector(".msg-plan-stack");
+      ctx.chatId = chatId;
 
       const res = await fetch(`/api/chats/${chatId}/messages`, {
         method: "POST",

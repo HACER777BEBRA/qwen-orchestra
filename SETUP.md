@@ -117,14 +117,15 @@ print(result.text, result.tier, result.model, result.gen)
 Примеры: `examples/ask_sdk.py`, `examples/ask_sdk_bot.py` (Ollama + OpenRouter).  
 `settings.json`: в корне репо при разработке; иначе `%LOCALAPPDATA%/qwen-orchestra/` (Windows) или `~/.config/qwen-orchestra/`.
 Блок `selfcheck` (опц.): `flag_refusal` / `flag_uncertain` / `flag_irrelevant` и списки фраз — браковать ли короткие отказы («не могу»), неуверенность («не знаю») и LLM-вердикт «не по теме». По умолчанию все включены; UI — «Модели и промпты».
+Блок `plan`: тумблер декомпозиции, `max_steps` (2–6), селект **модели планировщика**. Составленный план в чате нужно **утвердить** кнопкой, иначе оркестр ответит одним воркером. Классификатор «нужен ли план» — модель роутера; один вопрос план не строит, два независимых («курс доллара и описание одуванчика») — строит. Пункты стримятся в сворачиваемые окна над итоговым ответом.
 
 ---
 
 ## Веб-UI (кратко)
 
 - Слева — чаты; Composer; селектор Auto / модели пула
-- Markdown + код + LaTeX; чипы tier / ctx / история / selfcheck
-- «Модели и промпты» — пул моделей (тир опционален), Ollama/OpenRouter; «Удалить» убирает из пула
+- Markdown + код + LaTeX; чипы tier / ctx / история / selfcheck / план / счёт ПК
+- «Модели и промпты» — пул моделей (тир опционален), Ollama/OpenRouter, модель роутера и планировщика; «Удалить» убирает из пула
 - Правая панель — монитор CPU/RAM/GPU/температуры/Ollama
 - Чаты in-memory (сброс при рестарте сервера)
 
@@ -148,7 +149,7 @@ print(result.text, result.tier, result.model, result.gen)
 
 | Путь | Назначение |
 |------|------------|
-| `qwen_orchestra/` | SDK: Client, orchestra, router, selfcheck, llm, settings, metrics |
+| `qwen_orchestra/` | SDK: Client, orchestra, plan, router, selfcheck, llm, settings, metrics |
 | `orchestra.py` и др. | Shim-модули для старых импортов |
 | `server.py` | FastAPI + SSE + `/api/metrics`, порт `8787` |
 | `web/` | UI (чат + монитор) |

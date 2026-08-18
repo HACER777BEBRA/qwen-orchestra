@@ -12,6 +12,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from .calc import need_calc
 from .llm import chat
 
 # Tier — один из 10 фиксированных id (tiny…frontier). Обновляется через settings.apply_to_runtime.
@@ -86,6 +87,7 @@ class RouteDecision:
     reason: str
     reply: str = ""
     need_local_time: bool = False
+    need_calc: bool = False
 
 
 _WEB_KEYS = (
@@ -607,7 +609,8 @@ def _heuristic(user_text: str) -> RouteDecision:
         )
 
     local = need_local_time(t)
-    if _looks_tiny(t) and not local:
+    calc = need_calc(t)
+    if _looks_tiny(t) and not local and not calc:
         return RouteDecision(True, "tiny", False, "heuristic:greeting", "")
 
     return RouteDecision(
@@ -616,6 +619,7 @@ def _heuristic(user_text: str) -> RouteDecision:
         _looks_web(t),
         "heuristic:floor",
         need_local_time=local,
+        need_calc=calc,
     )
 
 
@@ -666,9 +670,10 @@ def route(user_text: str) -> RouteDecision:
 
     floor = tier_floor(user_text)
     web = need_web(user_text)
+    calc = need_calc(user_text)
 
     # Жёсткие лёгкие кейсы — не спрашиваем модели
-    if floor == "tiny" and _looks_tiny(user_text):
+    if floor == "tiny" and _looks_tiny(user_text) and not calc:
         reply = _tiny_shortcut_reply(user_text)
         if reply:
             return RouteDecision(True, "tiny", False, "tiny-shortcut", reply)
@@ -685,19 +690,20 @@ def route(user_text: str) -> RouteDecision:
             "web-shortcut",
             "",
             need_local_time=local,
+            need_calc=calc,
         )
     if floor == "coder":
         return RouteDecision(
-            True, "coder", False, "floor:coder", "", need_local_time=local
+            True, "coder", False, "floor:coder", "", need_local_time=local, need_calc=calc
         )
     if floor == "xlarge":
         return RouteDecision(
-            True, "xlarge", False, "floor:xlarge", "", need_local_time=local
+            True, "xlarge", False, "floor:xlarge", "", need_local_time=local, need_calc=calc
         )
     # mid/heavy без расширенного auto — детерминированно (экономия VRAM)
     if floor == "heavy" and not _has_extra_auto():
         return RouteDecision(
-            True, "heavy", False, "floor:heavy", "", need_local_time=local
+            True, "heavy", False, "floor:heavy", "", need_local_time=local, need_calc=calc
         )
     if floor == "mid" and not _has_extra_auto():
         return RouteDecision(
@@ -707,8 +713,9 @@ def route(user_text: str) -> RouteDecision:
             "floor:mid",
             "",
             need_local_time=local,
+            need_calc=calc,
         )
-    if local and not _has_extra_auto():
+    if local and not _has_extra_auto() and not calc:
         return RouteDecision(
             True,
             _clamp(floor, user_text),
@@ -716,6 +723,17 @@ def route(user_text: str) -> RouteDecision:
             "local-time",
             "",
             need_local_time=True,
+            need_calc=calc,
+        )
+    if calc and not _has_extra_auto():
+        return RouteDecision(
+            True,
+            _clamp(floor, user_text),
+            False,
+            "calc-shortcut",
+            "",
+            need_local_time=local,
+            need_calc=True,
         )
 
     ask_model = _resolve_local_router_model(ROUTE_MODEL)
@@ -772,5 +790,5 @@ def route(user_text: str) -> RouteDecision:
         reply = ""
 
     return RouteDecision(
-        ok, tier, need, reason or f"floor:{floor}", reply, need_local_time=local
+        ok, tier, need, reason or f"floor:{floor}", reply, need_local_time=local, need_calc=calc
     )

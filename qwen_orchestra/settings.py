@@ -399,6 +399,70 @@ def default_selfcheck_settings() -> SelfcheckSettings:
     return SelfcheckSettings()
 
 
+DEFAULT_PLANNER_MODEL = "qwen3.5:4b"
+DEFAULT_PLAN_MAX_STEPS = 4
+
+
+@dataclass
+class PlanSettings:
+    """Декомпозиция сложных запросов: вкл/выкл, лимит шагов, промпты."""
+
+    enabled: bool = True
+    max_steps: int = DEFAULT_PLAN_MAX_STEPS
+    classifier_prompt: str | None = None
+    planner_prompt: str | None = None
+    composer_prompt: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "enabled": bool(self.enabled),
+            "max_steps": int(self.max_steps),
+        }
+        if self.classifier_prompt is not None:
+            out["classifier_prompt"] = self.classifier_prompt
+        if self.planner_prompt is not None:
+            out["planner_prompt"] = self.planner_prompt
+        if self.composer_prompt is not None:
+            out["composer_prompt"] = self.composer_prompt
+        return out
+
+
+def default_plan_settings() -> PlanSettings:
+    return PlanSettings()
+
+
+def _optional_prompt_field(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def _plan_from_dict(raw: Any) -> PlanSettings:
+    if not isinstance(raw, dict):
+        return default_plan_settings()
+    enabled = raw.get("enabled")
+    max_steps = raw.get("max_steps")
+    try:
+        steps = int(max_steps) if max_steps is not None else DEFAULT_PLAN_MAX_STEPS
+    except (TypeError, ValueError):
+        steps = DEFAULT_PLAN_MAX_STEPS
+    steps = max(2, min(6, steps))
+    return PlanSettings(
+        enabled=True if enabled is None else bool(enabled),
+        max_steps=steps,
+        classifier_prompt=_optional_prompt_field(raw.get("classifier_prompt"))
+        if "classifier_prompt" in raw
+        else None,
+        planner_prompt=_optional_prompt_field(raw.get("planner_prompt"))
+        if "planner_prompt" in raw
+        else None,
+        composer_prompt=_optional_prompt_field(raw.get("composer_prompt"))
+        if "composer_prompt" in raw
+        else None,
+    )
+
+
 def _normalize_pattern_list(raw: Any) -> list[str] | None:
     """None → builtins-сигнал; иначе список строк (можно пустой)."""
     if raw is None:
@@ -452,13 +516,17 @@ def _selfcheck_from_dict(raw: Any) -> SelfcheckSettings:
 class AppSettings:
     models: list[PoolModel] = field(default_factory=list)
     router_model: str = DEFAULT_ROUTER_MODEL
+    planner_model: str = DEFAULT_PLANNER_MODEL
     selfcheck: SelfcheckSettings = field(default_factory=default_selfcheck_settings)
+    plan: PlanSettings = field(default_factory=default_plan_settings)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "router_model": self.router_model,
+            "planner_model": self.planner_model,
             "models": [m.to_dict() for m in self.models],
             "selfcheck": self.selfcheck.to_dict(),
+            "plan": self.plan.to_dict(),
         }
 
     # Совместимость: старый код ждал .slots
@@ -606,7 +674,9 @@ def default_settings() -> AppSettings:
     return AppSettings(
         models=_default_pool(),
         router_model=DEFAULT_ROUTER_MODEL,
+        planner_model=DEFAULT_PLANNER_MODEL,
         selfcheck=default_selfcheck_settings(),
+        plan=default_plan_settings(),
     )
 
 
@@ -675,8 +745,18 @@ def _merge_with_defaults(raw: dict[str, Any] | None) -> AppSettings:
         ),
     )
     router_model = _normalize_router_model(raw.get("router_model"), fallback=tiny)
+    planner_model = _normalize_router_model(
+        raw.get("planner_model"), fallback=DEFAULT_PLANNER_MODEL
+    )
     selfcheck = _selfcheck_from_dict(raw.get("selfcheck"))
-    return AppSettings(models=models, router_model=router_model, selfcheck=selfcheck)
+    plan = _plan_from_dict(raw.get("plan"))
+    return AppSettings(
+        models=models,
+        router_model=router_model,
+        planner_model=planner_model,
+        selfcheck=selfcheck,
+        plan=plan,
+    )
 
 
 def load_settings(*, path: Path | None = None) -> AppSettings:
@@ -702,7 +782,9 @@ def deepcopy_settings(src: AppSettings) -> AppSettings:
     return AppSettings(
         models=[_pool_from_dict(m.to_dict(), used_ids=used) for m in src.models],
         router_model=src.router_model,
+        planner_model=src.planner_model,
         selfcheck=_selfcheck_from_dict(src.selfcheck.to_dict()),
+        plan=_plan_from_dict(src.plan.to_dict()),
     )
 
 
@@ -858,11 +940,14 @@ def build_route_schema(settings: AppSettings | None = None) -> dict[str, Any]:
 
 def public_settings_payload(settings: AppSettings | None = None) -> dict[str, Any]:
     from .selfcheck import DEFAULT_REFUSAL_PATTERNS, DEFAULT_UNCERTAIN_PATTERNS
+    from . import plan as plan_mod
 
     s = settings or get_settings()
     sc = s.selfcheck
+    pl = s.plan
     return {
         "router_model": s.router_model,
+        "planner_model": s.planner_model,
         "models": [m.to_dict() for m in s.models],
         # compat для старого UI на один релиз
         "slots": [m.to_dict() for m in s.models],
@@ -882,6 +967,27 @@ def public_settings_payload(settings: AppSettings | None = None) -> dict[str, An
             "using_default_refusal_patterns": sc.refusal_patterns is None,
             "using_default_uncertain_patterns": sc.uncertain_patterns is None,
         },
+        "plan": {
+            **pl.to_dict(),
+            "classifier_prompt_effective": (
+                pl.classifier_prompt
+                if pl.classifier_prompt is not None
+                else plan_mod.DEFAULT_CLASSIFIER_SYSTEM
+            ),
+            "planner_prompt_effective": (
+                pl.planner_prompt
+                if pl.planner_prompt is not None
+                else plan_mod.DEFAULT_PLANNER_SYSTEM
+            ),
+            "composer_prompt_effective": (
+                pl.composer_prompt
+                if pl.composer_prompt is not None
+                else plan_mod.DEFAULT_COMPOSER_SYSTEM
+            ),
+            "using_default_classifier_prompt": pl.classifier_prompt is None,
+            "using_default_planner_prompt": pl.planner_prompt is None,
+            "using_default_composer_prompt": pl.composer_prompt is None,
+        },
         "fixed_tiers": [
             {
                 "id": tid,
@@ -894,6 +1000,7 @@ def public_settings_payload(settings: AppSettings | None = None) -> dict[str, An
         ],
         "defaults": {
             "router_model": DEFAULT_ROUTER_MODEL,
+            "planner_model": DEFAULT_PLANNER_MODEL,
             "models": [m.to_dict() for m in _default_pool()],
             "router_prompts": DEFAULT_ROUTER_PROMPTS,
             "fixed_tiers": list(FIXED_TIER_IDS),
@@ -901,6 +1008,12 @@ def public_settings_payload(settings: AppSettings | None = None) -> dict[str, An
                 **default_selfcheck_settings().to_dict(),
                 "refusal_patterns": list(DEFAULT_REFUSAL_PATTERNS),
                 "uncertain_patterns": list(DEFAULT_UNCERTAIN_PATTERNS),
+            },
+            "plan": {
+                **default_plan_settings().to_dict(),
+                "classifier_prompt": plan_mod.DEFAULT_CLASSIFIER_SYSTEM,
+                "planner_prompt": plan_mod.DEFAULT_PLANNER_SYSTEM,
+                "composer_prompt": plan_mod.DEFAULT_COMPOSER_SYSTEM,
             },
         },
         "router_system": build_router_system(s),
@@ -983,9 +1096,11 @@ def update_settings(
     models_payload: list[dict[str, Any]],
     *,
     router_model: str | None = None,
+    planner_model: str | None = None,
     selfcheck: dict[str, Any] | SelfcheckSettings | None = None,
+    plan: dict[str, Any] | PlanSettings | None = None,
 ) -> AppSettings:
-    """Полная замена пула (+ опционально модель роутера / selfcheck)."""
+    """Полная замена пула (+ опционально модель роутера / планировщика / selfcheck / plan)."""
     if not isinstance(models_payload, list) or not models_payload:
         raise ValueError("Нужен непустой список models")
     for item in models_payload:
@@ -996,6 +1111,10 @@ def update_settings(
         router_model if router_model is not None else current.router_model,
         fallback=current.router_model or DEFAULT_ROUTER_MODEL,
     )
+    pm = _normalize_router_model(
+        planner_model if planner_model is not None else current.planner_model,
+        fallback=current.planner_model or DEFAULT_PLANNER_MODEL,
+    )
     used: set[str] = set()
     models = [_pool_from_dict(x, used_ids=used) for x in models_payload]
     if selfcheck is None:
@@ -1004,7 +1123,21 @@ def update_settings(
         sc = selfcheck
     else:
         sc = _selfcheck_from_dict(selfcheck)
-    return save_settings(AppSettings(models=models, router_model=rm, selfcheck=sc))
+    if plan is None:
+        pl = _plan_from_dict(current.plan.to_dict())
+    elif isinstance(plan, PlanSettings):
+        pl = plan
+    else:
+        pl = _plan_from_dict(plan)
+    return save_settings(
+        AppSettings(
+            models=models,
+            router_model=rm,
+            planner_model=pm,
+            selfcheck=sc,
+            plan=pl,
+        )
+    )
 
 
 def delete_model(model_id: str) -> AppSettings:
@@ -1145,9 +1278,16 @@ def apply_to_runtime(settings: AppSettings | None = None) -> None:
         orchestra.SELFCHECK_MODEL = selfcheck
         orchestra._COMPLEX_TIERS = complex_tiers  # type: ignore[attr-defined]
 
+        from . import plan as plan_mod
         from . import selfcheck as selfcheck_mod
 
         selfcheck_mod.set_rules(s.selfcheck.to_rules())
+        plan_mod.ENABLED = bool(s.plan.enabled)
+        plan_mod.MAX_STEPS = plan_mod.clamp_max_steps(s.plan.max_steps)
+        plan_mod.PLANNER_MODEL = s.planner_model or DEFAULT_PLANNER_MODEL
+        plan_mod.CLASSIFIER_SYSTEM = (s.plan.classifier_prompt or "").strip()
+        plan_mod.PLANNER_SYSTEM = (s.plan.planner_prompt or "").strip()
+        plan_mod.COMPOSER_SYSTEM = (s.plan.composer_prompt or "").strip()
 
         for key, val in ranks.items():
             router.TIER_RANK[key] = val

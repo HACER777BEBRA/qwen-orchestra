@@ -16,7 +16,7 @@
 In-process оркестр поверх **Ollama** (локально) и опционально **OpenRouter** (облако):
 
 ```
-ask() → route → plan_worker_context → worker (± web / ± время ПК)
+ask() → route → need_plan? → (planner → шаги → compose) | worker (± web / ± счёт ПК / ± время ПК)
               → selfcheck → retry на модель с большим rank (до 3 попыток)
 ```
 
@@ -48,7 +48,7 @@ print(result.model, result.tier, result.gen)
 4. **`force_model`** — это **id записи пула** (`"ollama:qwen3.5:4b"`, `"openrouter:anthropic/claude-sonnet-4"`), не сырое имя модели Ollama/OR.
 5. **История** в `ask(history=…)` — **без** текущего user-сообщения. Формат: `[{"role":"user"|"assistant","content":"..."}, ...]`.
 6. В ботах всегда `verbose` уже выключен у `Client.ask`; стрим — через `on_token` / `on_status`, не через print.
-7. **Web-tools** (`web_search`, `fetch_url`) работают **только у Ollama-воркера**. У OpenRouter tools нет.
+7. **Tools** (`web_search`, `fetch_url`, `calculate`) работают **только у Ollama-воркера**. У OpenRouter tools нет: счёт — предрасчёт в system или строка `CALCULATE:` после ответа.
 8. Ключ OpenRouter: env `OPENROUTER_API_KEY` **или** `client.set_openrouter_api_key(...)` → `secrets.json` рядом с settings. Не коммить ключ.
 9. Health: `ok=true`, если ≥1 модель пула доступна (Ollama pull’нута **или** OpenRouter с ключом). `missing` — критичные дыры для Auto.
 10. Не вызывай низкоуровневые модули (`orchestra.handle`, `llm.chat`) из чужого проекта без нужды — контракт = `Client`.
@@ -173,6 +173,8 @@ from qwen_orchestra import (
 | `missing_optional` | назначены, но недоступны (не ломают `ok` сами по себе в типичной схеме) |
 | `router_model` | модель роутера из settings |
 | `router_missing` | роутер не найден в Ollama |
+| `planner_model` | модель JSON-планировщика |
+| `planner_missing` | планировщик не найден (план пропускается, `ok` не ломает) |
 | `tiers` | map `tier → лучшая модель` (derived) |
 | `pool` / `slots` | записи пула (`to_dict`) |
 | `providers.openrouter` | `{configured, from_env, from_file, base_url, api_key_env}` |
@@ -191,6 +193,7 @@ class RouteDecision:
     reason: str
     reply: str = ""        # короткий ответ tiny или отказ
     need_local_time: bool = False
+    need_calc: bool = False
 ```
 
 ### `ask(user_text, history=None, *, ...) -> OrchestraResult`
@@ -217,9 +220,11 @@ class RouteDecision:
 | `frequency_penalty` | `None` | OpenRouter / OpenAI-совместимые |
 | `stop` | `None` | стоп-последовательности (`str` / `list[str]`) |
 | `keep_alive` | `None` | Ollama; default **`"10m"`** (`"0"` — выгрузить сразу) |
+| `allow_plan` | `True` | декомпозиция сложных запросов; `False` — сразу один воркер |
+| `on_plan_confirm` | `None` | колбэк `{goal, steps}` → `"approve"` / `"reject"`; без него план идёт сразу |
 
 Плоские kwargs и поля `gen` **мержатся**: не-`None` плоский параметр побеждает.  
-Роутер и selfcheck **всегда** `temperature=0` — `GenOptions` на них не влияет.
+Роутер, планировщик и selfcheck **всегда** `temperature=0` — `GenOptions` на них не влияет.
 
 ```python
 @dataclass
@@ -237,7 +242,11 @@ class OrchestraResult:
     used_history: bool = True
     context_reason: str = ""
     need_local_time: bool = False
+    need_calc: bool = False
     gen: GenOptions | None     # фактически применённые опции воркера
+    planned: bool = False
+    plan_goal: str = ""
+    plan_steps: list[dict]     # [{id, title, tier, model, prompt, text}]
 ```
 
 Метаданные относятся к **выбранной** (лучшей/успешной) попытке.
@@ -298,8 +307,8 @@ Defaults воркера, если ничего не задано: `temperature=0
 
 | Метод | Назначение |
 |-------|------------|
-| `get_settings()` | публичный payload (models, tiers, providers, selfcheck, defaults…) |
-| `update_settings(models=…, router_model=…, selfcheck=…)` | заменить пул (+ опц. selfcheck) |
+| `get_settings()` | публичный payload (models, tiers, providers, selfcheck, plan, defaults…) |
+| `update_settings(models=…, router_model=…, planner_model=…, selfcheck=…, plan=…)` | заменить пул (+ опц. роутер/планировщик/selfcheck/plan) |
 | `reset_settings()` | defaults |
 | `add_model(...)` | добавить/обновить одну запись |
 | `delete_model(model_id)` | удалить по id |
@@ -335,6 +344,26 @@ client.update_settings(
   "flag_uncertain": true,
   "flag_irrelevant": true
 }
+```
+
+#### `plan` — декомпозиция сложных запросов
+
+По умолчанию два независимых атомарных вопроса в одном сообщении (или список
+пунктов) идут через планировщик (`planner_model`, обычно `qwen3.5:4b`).
+Расчёт (`need_calc`) всегда план: неделимый блок «Формула» + «Счёт ПК» (синтезируется
+кодом, без LLM-планировщика). Шаги выполняются последовательно: в веб-чате каждый
+пункт стримится в своё сворачиваемое окно, блок расчёта обведён рамкой,
+публичный `on_token` получает только склейку.
+`force_model` план отключает.
+На один вызов: `client.ask(..., allow_plan=False)`.
+Веб-чат показывает план и ждёт кнопку; в SDK без `on_plan_confirm` шаги стартуют сразу.
+
+```python
+client.update_settings(
+    models,
+    planner_model="qwen3.5:4b",
+    plan={"enabled": True, "max_steps": 4},
+)
 ```
 
 #### `add_model` — параметры
@@ -479,7 +508,7 @@ def on_token(chunk: str) -> None:
     # например: bot.send_chat_action / edit_message
 
 def on_status(event: str, payload: dict) -> None:
-    # event: route | context | worker | tool | selfcheck | retry | restore
+    # event: route | plan | plan_ready | plan_accepted | plan_rejected | plan_step | plan_token | plan_step_done | compose | context | worker | tool | selfcheck | retry | restore
     print(event, payload)
 
 result = client.ask(
@@ -495,14 +524,21 @@ assert "".join(buf) == result.text or True  # при retry UI может очи�
 | event | Когда |
 |-------|--------|
 | `route` | выбран тир / причина |
+| `plan` | нужен ли план (`need_plan`, `reason`) |
+| `plan_ready` | JSON-план: `goal`, `steps`, `planner_model`, `awaiting` |
+| `plan_accepted` / `plan_rejected` | пользователь утвердил или отклонил план |
+| `plan_step` | старт шага (`index`, `total`, `title`, `tier`) |
+| `plan_token` | кусок ответа шага (`id`, `text`) — не путать с `on_token` |
+| `plan_step_done` | шаг закончен (`id`, `failed`, `text`) |
+| `compose` | сборка финального ответа |
 | `context` | `num_ctx`, `used_history`, `context_reason` |
 | `worker` | старт воркера на модели |
 | `tool` | вызов web-tool (Ollama) |
 | `selfcheck` | результат проверки |
-| `retry` | ответ забракован, escalate |
+| `retry` | ответ забракован, escalate (`scope=step` — внутри шага плана) |
 | `restore` | возврат лучшей из неудачных попыток |
 
-При `retry` / `restore` потребитель стрима должен уметь **сбросить** уже показанный текст (как UI чата).
+При `retry` / `restore` **без** `scope=step` потребитель стрима должен уметь **сбросить** уже показанный текст (как UI чата). Токены шагов плана в `on_token` не приходят — только сборка.
 
 ---
 
@@ -623,12 +659,14 @@ def assert_orchestra_ready(client: Client) -> None:
 |------|------|
 | `qwen_orchestra/client.py` | публичный `Client` |
 | `qwen_orchestra/orchestra.py` | `handle`, `OrchestraResult` |
+| `qwen_orchestra/plan.py` | декомпозиция: need_plan, JSON-шаги, сборка |
 | `qwen_orchestra/router.py` | `route`, `RouteDecision`, floor/ceiling |
 | `qwen_orchestra/settings.py` | пул, secrets, bootstrap |
 | `qwen_orchestra/llm.py` | Ollama + OpenRouter HTTP |
 | `qwen_orchestra/selfcheck.py` | проверка ответа |
 | `qwen_orchestra/tools_web.py` | web_search / fetch_url |
 | `qwen_orchestra/tools_local.py` | время ПК |
+| `qwen_orchestra/calc.py` | прямой счёт на CPU (`calculate`) |
 | `examples/ask_sdk.py` | минимальный пример |
 | `examples/ask_sdk_bot.py` | шаблон под бота (локально + OR) |
 

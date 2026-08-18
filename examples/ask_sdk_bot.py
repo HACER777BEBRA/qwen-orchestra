@@ -71,7 +71,7 @@ def main() -> None:
         print(t, end="", flush=True)
 
     def on_status(event: str, payload: dict) -> None:
-        if event in {"route", "worker", "retry", "selfcheck"}:
+        if event in {"route", "worker", "retry", "selfcheck", "plan", "plan_ready", "plan_accepted", "plan_rejected", "plan_step", "compose"}:
             print(f"\n[{event}] {payload}", flush=True)
 
     result = client.ask(

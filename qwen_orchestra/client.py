@@ -61,6 +61,7 @@ class Client:
         missing_optional: list[str] = []
         error: str | None = None
         router_missing = False
+        planner_missing = False
         cfg = app_settings.get_settings()
         try:
             models = installed_models()
@@ -73,12 +74,18 @@ class Client:
                 router_missing = not any(
                     m == router_name or m.startswith(router_name + ":") for m in have
                 )
+            planner_name = cfg.planner_model
+            if planner_name and planner_name not in have:
+                planner_missing = not any(
+                    m == planner_name or m.startswith(planner_name + ":") for m in have
+                )
         except Exception as exc:  # noqa: BLE001
             error = str(exc)
             have: set[str] = set()
             missing = missing_models(have)
             missing_optional = missing_optional_models(have)
             router_missing = True
+            planner_missing = True
         return {
             "ok": not missing,
             "ollama": ollama_ok,
@@ -87,6 +94,8 @@ class Client:
             "missing_optional": missing_optional,
             "router_model": cfg.router_model,
             "router_missing": router_missing,
+            "planner_model": cfg.planner_model,
+            "planner_missing": planner_missing,
             "tiers": dict(MODELS),
             "pool": [m.to_dict() for m in cfg.models],
             "slots": [m.to_dict() for m in cfg.models],
@@ -119,12 +128,17 @@ class Client:
         frequency_penalty: float | None = None,
         stop: list[str] | tuple[str, ...] | str | None = None,
         keep_alive: str | None = None,
+        allow_plan: bool = True,
+        on_plan_confirm: Callable[[dict[str, Any]], str] | None = None,
     ) -> OrchestraResult:
         """Полный цикл оркестра. По умолчанию без print в stdout.
 
         Сэмплинг воркера: ``temperature`` / ``gen=GenOptions(...)`` и соседние
-        параметры (``top_p``, ``seed``, ``num_predict``, …). Роутер и selfcheck
-        всегда с temperature=0 и эти опции не меняют.
+        параметры (``top_p``, ``seed``, ``num_predict``, …). Роутер, планировщик
+        и selfcheck всегда с temperature=0 и эти опции не меняют.
+        ``allow_plan=False`` — без декомпозиции (один воркер).
+        ``on_plan_confirm`` — колбэк утверждения плана (``approve`` / ``reject``);
+        без него план выполняется сразу.
         """
         return handle(
             user_text,
@@ -146,6 +160,8 @@ class Client:
             frequency_penalty=frequency_penalty,
             stop=stop,
             keep_alive=keep_alive,
+            allow_plan=allow_plan,
+            on_plan_confirm=on_plan_confirm,
         )
 
     def get_settings(self) -> dict[str, Any]:
@@ -158,14 +174,20 @@ class Client:
         *,
         slots: list[dict[str, Any]] | None = None,
         router_model: str | None = None,
+        planner_model: str | None = None,
         selfcheck: dict[str, Any] | None = None,
+        plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         app_settings.ensure_bootstrapped()
         payload = models if models is not None else slots
         if payload is None:
             raise ValueError("Нужен список models")
         app_settings.update_settings(
-            payload, router_model=router_model, selfcheck=selfcheck
+            payload,
+            router_model=router_model,
+            planner_model=planner_model,
+            selfcheck=selfcheck,
+            plan=plan,
         )
         return app_settings.public_settings_payload()
 

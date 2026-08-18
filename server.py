@@ -29,6 +29,7 @@ from qwen_orchestra.llm import installed_models
 from qwen_orchestra.metrics import collect as collect_metrics
 from qwen_orchestra.orchestra import MODELS, handle, missing_models, missing_optional_models
 from qwen_orchestra import settings as app_settings
+from qwen_orchestra.plan import PLAN_CONFIRM_TIMEOUT
 
 import share_config
 
@@ -115,11 +116,17 @@ class SendMessageBody(BaseModel):
     force_model: str | None = None
 
 
+class PlanActionBody(BaseModel):
+    action: str  # approve | reject
+
+
 class SettingsPutBody(BaseModel):
     models: list[dict[str, Any]] | None = None
     slots: list[dict[str, Any]] | None = None  # compat
     router_model: str | None = None
+    planner_model: str | None = None
     selfcheck: dict[str, Any] | None = None
+    plan: dict[str, Any] | None = None
 
 
 class AddModelBody(BaseModel):
@@ -147,6 +154,15 @@ _chats: dict[str, ChatSession] = {}
 _lock = threading.Lock()
 # Один активный ответ на чат — иначе гонка истории при параллельных POST
 _chat_workers: dict[str, threading.Lock] = {}
+# chat_id → ожидание кнопки «утвердить план» (не кладём Event в pydantic-чат)
+_plan_waits: dict[str, "_PlanWait"] = {}
+
+
+class _PlanWait:
+    def __init__(self, generation: int) -> None:
+        self.generation = generation
+        self.event = threading.Event()
+        self.action: str | None = None
 
 
 def _now() -> float:
@@ -176,6 +192,7 @@ def _result_meta(result: Any) -> dict[str, Any]:
         "model": result.model,
         "need_web": result.need_web,
         "need_local_time": getattr(result, "need_local_time", False),
+        "need_calc": getattr(result, "need_calc", False),
         "route_reason": result.route_reason,
         "escalated": result.escalated,
         "attempts": result.attempts,
@@ -184,6 +201,9 @@ def _result_meta(result: Any) -> dict[str, Any]:
         "num_ctx": result.num_ctx,
         "used_history": result.used_history,
         "context_reason": result.context_reason,
+        "planned": getattr(result, "planned", False),
+        "plan_goal": getattr(result, "plan_goal", "") or "",
+        "plan_steps": getattr(result, "plan_steps", None) or [],
     }
 
 
@@ -256,6 +276,7 @@ def health() -> dict[str, Any]:
     missing_optional: list[str] = []
     error: str | None = None
     router_missing = False
+    planner_missing = False
     try:
         models = installed_models()
         have = set(models)
@@ -268,12 +289,18 @@ def health() -> dict[str, Any]:
             router_missing = not any(
                 m == router_name or m.startswith(router_name + ":") for m in have
             )
+        planner_name = app_settings.get_settings().planner_model
+        if planner_name and planner_name not in have:
+            planner_missing = not any(
+                m == planner_name or m.startswith(planner_name + ":") for m in have
+            )
     except Exception as exc:  # noqa: BLE001
         error = str(exc)
         have = set()
         missing = missing_models(have)
         missing_optional = missing_optional_models(have)
         router_missing = True
+        planner_missing = True
     or_status = app_settings.openrouter_status()
     cfg = app_settings.get_settings()
     return {
@@ -285,6 +312,8 @@ def health() -> dict[str, Any]:
         "missing_optional": missing_optional,
         "router_model": cfg.router_model,
         "router_missing": router_missing,
+        "planner_model": cfg.planner_model,
+        "planner_missing": planner_missing,
         "tiers": dict(MODELS),
         "pool": [m.to_dict() for m in cfg.models],
         "slots": [m.to_dict() for m in cfg.models],  # compat
@@ -313,7 +342,9 @@ def put_settings(body: SettingsPutBody) -> dict[str, Any]:
         saved = app_settings.update_settings(
             payload,
             router_model=body.router_model,
+            planner_model=body.planner_model,
             selfcheck=body.selfcheck,
+            plan=body.plan,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -417,6 +448,7 @@ def delete_chat(chat_id: str) -> dict[str, str]:
                 raise HTTPException(404, "Chat not found")
             del _chats[chat_id]
             _chat_workers.pop(chat_id, None)
+            _plan_waits.pop(chat_id, None)
         return {"status": "ok"}
     finally:
         wlock.release()
@@ -487,6 +519,8 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
             chat.messages.append(ChatMessage(role="user", content=content))
             chat.updated_at = _now()
             generation = chat.generation
+            wait = _PlanWait(generation)
+            _plan_waits[chat_id] = wait
     except HTTPException:
         raise
     except Exception:
@@ -497,6 +531,14 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
 
     def on_token(token: str) -> None:
         _q_put(q, ("token", {"text": token}))
+
+    def on_plan_confirm(_payload: dict[str, Any]) -> str:
+        cur = _plan_waits.get(chat_id)
+        if cur is None or cur.generation != generation:
+            return "reject"
+        if not cur.event.wait(timeout=PLAN_CONFIRM_TIMEOUT):
+            return "timeout"
+        return (cur.action or "reject").strip().lower()
 
     def on_status(event: str, payload: dict[str, Any]) -> None:
         if event == "route":
@@ -509,8 +551,11 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "model": payload.get("model"),
                         "need_web": payload.get("need_web"),
                         "need_local_time": payload.get("need_local_time"),
+                        "need_calc": payload.get("need_calc"),
                         "route_reason": payload.get("reason"),
                         "ok": payload.get("ok"),
+                        "scope": payload.get("scope") or "",
+                        "id": payload.get("id") if payload.get("id") is not None else payload.get("step_id"),
                     },
                 ),
             )
@@ -523,6 +568,8 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "name": payload.get("name"),
                         "arguments": payload.get("arguments"),
                         "model": payload.get("model"),
+                        "scope": payload.get("scope") or "",
+                        "id": payload.get("id") if payload.get("id") is not None else payload.get("step_id"),
                     },
                 ),
             )
@@ -536,9 +583,12 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "model": payload.get("model"),
                         "need_web": payload.get("need_web"),
                         "need_local_time": payload.get("need_local_time"),
+                        "need_calc": payload.get("need_calc"),
                         "phase": "worker",
                         "num_ctx": payload.get("num_ctx"),
                         "used_history": payload.get("used_history"),
+                        "scope": payload.get("scope") or "",
+                        "id": payload.get("id") if payload.get("id") is not None else payload.get("step_id"),
                     },
                 ),
             )
@@ -554,6 +604,8 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "context_reason": payload.get("reason"),
                         "history_messages": payload.get("history_messages"),
                         "tier": payload.get("tier"),
+                        "scope": payload.get("scope") or "",
+                        "id": payload.get("id") if payload.get("id") is not None else payload.get("step_id"),
                     },
                 ),
             )
@@ -569,6 +621,8 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "attempt": payload.get("attempt"),
                         "model": payload.get("model"),
                         "checked": payload.get("checked"),
+                        "scope": payload.get("scope") or "",
+                        "id": payload.get("id") if payload.get("id") is not None else payload.get("step_id"),
                     },
                 ),
             )
@@ -584,6 +638,8 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "attempt": payload.get("attempt"),
                         "problems": payload.get("problems") or [],
                         "escalated": True,
+                        "scope": payload.get("scope") or "",
+                        "id": payload.get("id") if payload.get("id") is not None else payload.get("step_id"),
                     },
                 ),
             )
@@ -597,6 +653,111 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "model": payload.get("model"),
                         "tier": payload.get("tier"),
                         "problems": [],
+                        "scope": payload.get("scope") or "",
+                        "id": payload.get("id") if payload.get("id") is not None else payload.get("step_id"),
+                    },
+                ),
+            )
+        elif event == "plan":
+            _q_put(
+                q,
+                (
+                    "meta",
+                    {
+                        "phase": "plan",
+                        "need_plan": payload.get("need_plan"),
+                        "reason": payload.get("reason"),
+                        "source": payload.get("source"),
+                    },
+                ),
+            )
+        elif event == "plan_ready":
+            _q_put(
+                q,
+                (
+                    "meta",
+                    {
+                        "phase": "plan_ready",
+                        "goal": payload.get("goal"),
+                        "planner_model": payload.get("planner_model"),
+                        "steps": payload.get("steps") or [],
+                        "awaiting": bool(payload.get("awaiting")),
+                    },
+                ),
+            )
+        elif event == "plan_step":
+            _q_put(
+                q,
+                (
+                    "meta",
+                    {
+                        "phase": "plan_step",
+                        "index": payload.get("index"),
+                        "total": payload.get("total"),
+                        "id": payload.get("id"),
+                        "title": payload.get("title"),
+                        "model": payload.get("model"),
+                        "tier": payload.get("tier"),
+                        "block": payload.get("block"),
+                        "block_title": payload.get("block_title"),
+                        "block_role": payload.get("block_role"),
+                    },
+                ),
+            )
+        elif event == "plan_token":
+            _q_put(
+                q,
+                (
+                    "token",
+                    {
+                        "text": payload.get("text") or "",
+                        "scope": "step",
+                        "id": payload.get("id"),
+                    },
+                ),
+            )
+        elif event == "plan_step_done":
+            _q_put(
+                q,
+                (
+                    "meta",
+                    {
+                        "phase": "plan_step_done",
+                        "id": payload.get("id"),
+                        "index": payload.get("index"),
+                        "failed": bool(payload.get("failed")),
+                        "note": payload.get("note") or "",
+                        "model": payload.get("model"),
+                        "tier": payload.get("tier"),
+                        "text": payload.get("text") or "",
+                        "block": payload.get("block"),
+                        "block_title": payload.get("block_title"),
+                        "block_role": payload.get("block_role"),
+                    },
+                ),
+            )
+        elif event == "compose":
+            _q_put(
+                q,
+                (
+                    "meta",
+                    {
+                        "phase": "compose",
+                        "model": payload.get("model"),
+                        "tier": payload.get("tier"),
+                    },
+                ),
+            )
+        elif event == "plan_accepted":
+            _q_put(q, ("meta", {"phase": "plan_accepted"}))
+        elif event == "plan_rejected":
+            _q_put(
+                q,
+                (
+                    "meta",
+                    {
+                        "phase": "plan_rejected",
+                        "reason": payload.get("reason") or "reject",
                     },
                 ),
             )
@@ -612,6 +773,7 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                 verbose=False,
                 on_token=on_token,
                 on_status=on_status,
+                on_plan_confirm=on_plan_confirm,
             )
             meta = _result_meta(result)
             with _lock:
@@ -631,6 +793,10 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
         except Exception as exc:  # noqa: BLE001
             _q_put(q, ("error", {"message": str(exc)}))
         finally:
+            with _lock:
+                cur = _plan_waits.get(chat_id)
+                if cur is not None and cur.generation == generation:
+                    _plan_waits.pop(chat_id, None)
             wlock.release()
             _q_put(q, None)
 
@@ -657,6 +823,23 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/api/chats/{chat_id}/plan")
+def decide_chat_plan(chat_id: str, body: PlanActionBody) -> dict[str, Any]:
+    """Утвердить или отклонить план, пока SSE ещё ждёт (без worker-lock)."""
+    action = (body.action or "").strip().lower()
+    if action not in {"approve", "reject"}:
+        raise HTTPException(400, "action: approve или reject")
+    with _lock:
+        if chat_id not in _chats:
+            raise HTTPException(404, "Chat not found")
+        wait = _plan_waits.get(chat_id)
+        if wait is None or wait.event.is_set():
+            raise HTTPException(409, "Нет плана, ожидающего утверждения")
+        wait.action = action
+        wait.event.set()
+    return {"status": "ok", "action": action}
 
 
 @app.get("/")

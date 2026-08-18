@@ -171,6 +171,10 @@
           <label class="field-label" for="router-model-select">Модель роутера (Auto)</label>
           <select id="router-model-select" class="tier-select" title="Какая модель решает tier в Auto"></select>
         </div>
+        <div class="field-with-label">
+          <label class="field-label" for="planner-model-select">Модель планировщика</label>
+          <select id="planner-model-select" class="tier-select" title="Какая модель размечает шаги плана"></select>
+        </div>
       </div>
       <div class="selfcheck-settings" id="selfcheck-settings">
         <div class="field-label">Самопроверка ответа</div>
@@ -197,6 +201,33 @@
           <input type="checkbox" id="sc-flag-irrelevant" checked />
           Браковать «не по теме» (irrelevant, LLM-ревью)
         </label>
+      </div>
+      <div class="selfcheck-settings" id="plan-settings">
+        <div class="field-label">План сложных запросов</div>
+        <p class="modal-hint">
+          Два независимых вопроса в одном сообщении (или список пунктов)
+          разбиваются на шаги, ответы склеиваются. Планировщик — модель из
+          селекта выше. Классификатор «нужен ли план» — модель роутера.
+          В чат: сворачиваемое окно плана сверху, стрим каждого пункта
+          в своём окне, затем склейка в теле сообщения.
+        </p>
+        <label class="selfcheck-opt">
+          <input type="checkbox" id="plan-enabled" checked />
+          Декомпозировать сложные запросы
+        </label>
+        <div class="field-with-label">
+          <label class="field-label" for="plan-max-steps">Максимум шагов</label>
+          <input id="plan-max-steps" class="text-input rank-input" type="number" value="4" min="2" max="6" title="2–6" />
+        </div>
+        <label class="field-label" for="plan-classifier-prompt">Промпт классификатора</label>
+        <textarea id="plan-classifier-prompt" class="prompt-input" rows="3" spellcheck="false"
+          title="Когда нужен план"></textarea>
+        <label class="field-label" for="plan-planner-prompt">Промпт планировщика</label>
+        <textarea id="plan-planner-prompt" class="prompt-input" rows="3" spellcheck="false"
+          title="Как размечать шаги"></textarea>
+        <label class="field-label" for="plan-composer-prompt">Промпт сборки</label>
+        <textarea id="plan-composer-prompt" class="prompt-input" rows="3" spellcheck="false"
+          title="Как склеивать ответы шагов"></textarea>
       </div>
       <p class="modal-hint">
         Пул моделей: укажите тир для Auto или оставьте «не участвует в роутинге».

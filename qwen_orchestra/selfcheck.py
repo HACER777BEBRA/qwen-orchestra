@@ -13,12 +13,11 @@
 
 from __future__ import annotations
 
-import ast
 import json
-import operator
 import re
 from dataclasses import dataclass, field
 
+from .calc import CALC_VERB_RE, extract_evals, format_number, try_eval
 from .llm import chat
 
 # Скрипты письма: CJK (яп/кит/кор), кириллица, латиница
@@ -127,19 +126,11 @@ def set_rules(rules: SelfcheckRules | None) -> None:
     _RULES = rules if rules is not None else SelfcheckRules()
 
 # Арифметику проверяем сами: LLM-ревьюер такие ошибки пропускает
+# Глаголы — те же, что у calc (плюс короткие «сколько / how much» без выражения).
 _MATH_QUESTION_RE = re.compile(
-    r"сколько|посчитай|вычисли|чему равно|реши пример|calculate|how much", re.IGNORECASE
+    r"сколько|посчитай|вычисли|чему равно|реши пример|calculate|how much",
+    re.IGNORECASE,
 )
-_EXPR_RE = re.compile(r"\d+(?:[.,]\d+)?(?:\s*[-+*/^×xх]\s*\d+(?:[.,]\d+)?)+")
-
-_AST_OPS = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.Mod: operator.mod,
-    ast.Pow: operator.pow,
-}
 
 HINTS: dict[str, str] = {
     "language": "Прошлый ответ был не на языке вопроса. Ответь строго на языке пользователя.",
@@ -238,37 +229,12 @@ class Verdict:
         return True
 
 
-def _eval_node(node: ast.AST) -> float:
-    if isinstance(node, ast.Expression):
-        return _eval_node(node.body)
-    if isinstance(node, ast.Constant):
-        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
-            raise ValueError("not a number")
-        return float(node.value)
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
-        value = _eval_node(node.operand)
-        return value if isinstance(node.op, ast.UAdd) else -value
-    if isinstance(node, ast.BinOp) and type(node.op) in _AST_OPS:
-        left, right = _eval_node(node.left), _eval_node(node.right)
-        if isinstance(node.op, ast.Pow) and (abs(right) > 64 or abs(left) > 1e6):
-            raise ValueError("too big")
-        return _AST_OPS[type(node.op)](left, right)
-    raise ValueError("unsupported expression")
-
-
 def _eval_expr(raw: str) -> float | None:
-    expr = raw.replace(",", ".").replace("^", "**")
-    expr = re.sub(r"[×xх]", "*", expr, flags=re.IGNORECASE)
-    try:
-        return _eval_node(ast.parse(expr, mode="eval"))
-    except (SyntaxError, ValueError, ZeroDivisionError, OverflowError, TypeError):
-        return None
+    return try_eval(raw)
 
 
 def _fmt_number(value: float) -> str:
-    if abs(value - round(value)) < 1e-9:
-        return str(int(round(value)))
-    return f"{value:.4f}".rstrip("0").rstrip(".")
+    return format_number(value)
 
 
 def _mentions_number(answer: str, value: float) -> bool:
@@ -300,26 +266,29 @@ def arithmetic_problems(user_text: str, answer: str) -> tuple[list[str], str, bo
     Возвращает `(problems, note, verified)`. `verified=True` — ответ содержит
     верное значение; LLM-ревью можно пропустить только для почти чистой арифметики.
     """
-    if not _MATH_QUESTION_RE.search(user_text):
+    pairs = extract_evals(user_text)
+    if not pairs:
         return [], "", False
 
     verified = False
-    for raw in _EXPR_RE.findall(user_text):
-        value = _eval_expr(raw)
+    for expr, shown in pairs:
+        value = _eval_expr(expr)
         if value is None:
             continue
         if not _mentions_number(answer, value):
-            expr = " ".join(raw.split())
-            return ["error"], f"Правильное значение: {expr} = {_fmt_number(value)}.", False
+            return ["error"], f"Правильное значение: {expr} = {shown}.", False
         verified = True
     return [], "", verified
 
 
 def _math_only_question(user_text: str) -> bool:
     """Вопрос почти целиком про вычисление — без доп. частей вроде «и объясни»."""
-    rest = _MATH_QUESTION_RE.sub(" ", user_text or "")
-    rest = _EXPR_RE.sub(" ", rest)
-    rest = re.sub(r"[\s.,;:!?()\-+=*/×xх^]+", " ", rest, flags=re.IGNORECASE).strip()
+    rest = user_text or ""
+    for expr, _ in extract_evals(rest):
+        rest = rest.replace(expr, " ")
+    rest = CALC_VERB_RE.sub(" ", rest)
+    rest = _MATH_QUESTION_RE.sub(" ", rest)
+    rest = re.sub(r"[\s.,;:!?()\-+=*/×xх^%]+", " ", rest, flags=re.IGNORECASE).strip()
     return len(rest) < 16
 
 

@@ -1,7 +1,8 @@
 """Оркестр: tiny → nano → small → mid → large → heavy → xlarge/coder → ultra → frontier.
 
 Цикл одного запроса:
-    route → plan_worker_context → worker → selfcheck → (retry на старшем тире)
+    route → need_plan? → (planner → шаги → compose) | worker → selfcheck
+    → (retry на старшем тире)
 
 Адаптивный num_ctx (см. plan_worker_context):
     ceil_256(tokens(промпт) + template + reserve_ответа + safety)
@@ -15,11 +16,23 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
+from . import plan as plan_mod
 from . import selfcheck
 from . import settings as app_settings
+from .calc import (
+    CALC_LINE_RE,
+    CALC_SYSTEM,
+    CALC_SYSTEM_NOTOOLS,
+    TOOL_IMPL_CALC,
+    TOOLS_CALC,
+    calc_context_block,
+    ensure_computed,
+    need_calc,
+    pick_formula,
+)
 from .llm import GenOptions, chat, chat_stream, installed_models, merge_gen, worker_gen
 from .router import ALL_TIERS, TIER_ORDER, TIER_RANK, RouteDecision, Tier, need_local_time, need_web, route
 from .selfcheck import Verdict
@@ -27,8 +40,8 @@ from .tools_local import TOOL_IMPL_LOCAL, TOOLS_LOCAL, local_context_block
 from .tools_web import TOOL_IMPL, TOOLS
 
 # Web + локальные tools в одном пуле для Ollama tool-calling
-_ALL_TOOLS = list(TOOLS) + list(TOOLS_LOCAL)
-_ALL_TOOL_IMPL = {**TOOL_IMPL, **TOOL_IMPL_LOCAL}
+_ALL_TOOLS = list(TOOLS) + list(TOOLS_LOCAL) + list(TOOLS_CALC)
+_ALL_TOOL_IMPL = {**TOOL_IMPL, **TOOL_IMPL_LOCAL, **TOOL_IMPL_CALC}
 
 MODELS: dict[str, str] = {
     "tiny": "qwen3.5:0.8b",
@@ -172,6 +185,7 @@ RETRY_SYSTEM = """Предыдущая попытка ответа забрак�
 
 _SEARCH_RE = re.compile(r"(?:SEARCH|ПОИСК)\s*:\s*(.+)", re.IGNORECASE)
 _FETCH_RE = re.compile(r"(?:FETCH|ОТКРЫТЬ)\s*:\s*(https?://\S+)", re.IGNORECASE)
+_CALC_RE = CALC_LINE_RE
 _CODEISH_RE = re.compile(
     r"```|\bdef\s|\bclass\s|\bfunction\s|напиши\s+(код|функци|скрипт|класс|программ)|"
     r"реализуй|запрограммируй|сгенерируй\s+код|\btraceback\b|\bstack\s+trace\b",
@@ -193,6 +207,8 @@ _HISTORY_REF_RE = re.compile(
 
 StatusCallback = Callable[[str, dict[str, Any]], None]
 TokenCallback = Callable[[str], None]
+# approve | reject | timeout — иначе как reject
+PlanConfirmCallback = Callable[[dict[str, Any]], str]
 
 
 @dataclass
@@ -220,7 +236,11 @@ class OrchestraResult:
     used_history: bool = True
     context_reason: str = ""
     need_local_time: bool = False
+    need_calc: bool = False
     gen: GenOptions | None = None  # фактически применённые опции воркера
+    planned: bool = False
+    plan_goal: str = ""
+    plan_steps: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _provider_of(tier: str, providers: dict[str, str] | None = None) -> str:
@@ -359,6 +379,8 @@ def _run_tool(name: str, arguments) -> str:
                 arguments = {"query": arguments}
             elif name == "fetch_url":
                 arguments = {"url": arguments}
+            elif name == "calculate":
+                arguments = {"expression": arguments}
             else:
                 arguments = {}
     if not isinstance(arguments, dict):
@@ -402,7 +424,10 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _prompt_tokens(
-    user_text: str, history: list[dict], *, system: str = WORKER_SYSTEM
+    user_text: str,
+    history: list[dict],
+    *,
+    system: str = WORKER_SYSTEM,
 ) -> int:
     """Токены сырого промпта (system + история + user), без шаблона."""
     total = _estimate_tokens(system) + _estimate_tokens(user_text) + 8
@@ -481,6 +506,7 @@ def plan_worker_context(
     *,
     ctx_overhead_pct: int = 0,
     max_ctx: int | None = None,
+    system_extra: str | None = None,
 ) -> ContextPlan:
     """История и num_ctx: 1) не обрезать запрос 2) минимальный ctx / VRAM (+ запас модели)."""
     hist = [
@@ -489,10 +515,14 @@ def plan_worker_context(
         if h.get("role") in {"user", "assistant"} and (h.get("content") or "").strip()
     ]
     out_res = _output_reserve_tokens(user_text, tier)
+    system = WORKER_SYSTEM
+    extra = (system_extra or "").strip()
+    if extra:
+        system = f"{system}\n\n{extra}"
 
     if tier not in _COMPLEX_TIERS:
         hist = _trim_history_to_fit(user_text, hist[-HISTORY_FULL:], out_reserve=out_res)
-        prompt_tok = _prompt_tokens(user_text, hist)
+        prompt_tok = _prompt_tokens(user_text, hist, system=system)
         base = _min_num_ctx(prompt_tok, out_res)
         ctx, factor = _apply_ctx_scale(
             base, ctx_overhead_pct=ctx_overhead_pct, max_ctx=max_ctx
@@ -516,7 +546,7 @@ def plan_worker_context(
     else:
         hist = []
 
-    prompt_tok = _prompt_tokens(user_text, hist)
+    prompt_tok = _prompt_tokens(user_text, hist, system=system)
     base = _min_num_ctx(prompt_tok, out_res)
     ctx, factor = _apply_ctx_scale(
         base, ctx_overhead_pct=ctx_overhead_pct, max_ctx=max_ctx
@@ -542,6 +572,10 @@ def _fallback_tools(content: str) -> list[dict]:
     for m in _FETCH_RE.finditer(content or ""):
         url = m.group(1).strip().rstrip(".,)")
         calls.append({"function": {"name": "fetch_url", "arguments": {"url": url}}})
+    for m in _CALC_RE.finditer(content or ""):
+        expr = m.group(1).strip().rstrip(".,;")
+        if expr:
+            calls.append({"function": {"name": "calculate", "arguments": {"expression": expr}}})
     return calls
 
 
@@ -551,8 +585,12 @@ def _build_messages(
     retry_hint: str | None,
     *,
     local_context: str | None = None,
+    system_extra: str | None = None,
 ) -> list[dict]:
     system = WORKER_SYSTEM
+    extra = (system_extra or "").strip()
+    if extra:
+        system = f"{system}\n\n{extra}"
     if local_context:
         system = f"{system}\n\n{local_context}"
     if retry_hint:
@@ -563,6 +601,39 @@ def _build_messages(
             messages.append({"role": h["role"], "content": h["content"]})
     messages.append({"role": "user", "content": user_text})
     return messages
+
+
+def _tools_for(decision: RouteDecision) -> list:
+    """Какие tools отдать воркеру: web / время ПК / калькулятор."""
+    out: list = []
+    if decision.need_web:
+        out.extend(TOOLS)
+        out.extend(TOOLS_LOCAL)
+    if decision.need_calc:
+        out.extend(TOOLS_CALC)
+    if decision.need_local_time and not decision.need_web:
+        out.extend(TOOLS_LOCAL)
+    return out
+
+
+def _local_context_for(
+    decision: RouteDecision,
+    user_text: str,
+    *,
+    precompute: bool = False,
+) -> str | None:
+    parts: list[str] = []
+    if decision.need_local_time:
+        parts.append(local_context_block())
+    if decision.need_calc:
+        if precompute:
+            parts.append(CALC_SYSTEM_NOTOOLS)
+            pre = calc_context_block(user_text)
+            if pre:
+                parts.append(pre)
+        else:
+            parts.append(CALC_SYSTEM)
+    return "\n\n".join(parts) if parts else None
 
 
 def _worker_with_tools(
@@ -578,8 +649,11 @@ def _worker_with_tools(
     provider: str = "ollama",
     local_context: str | None = None,
     gen: GenOptions | None = None,
+    system_extra: str | None = None,
+    tools: list | None = None,
 ) -> str:
     g = worker_gen(gen)
+    tool_list = tools if tools is not None else _ALL_TOOLS
     if provider != "ollama":
         # MVP: tools только через Ollama
         return _worker_plain(
@@ -593,9 +667,14 @@ def _worker_with_tools(
             provider=provider,
             local_context=local_context,
             gen=g,
+            system_extra=system_extra,
         )
     messages = _build_messages(
-        user_text, history, retry_hint, local_context=local_context
+        user_text,
+        history,
+        retry_hint,
+        local_context=local_context,
+        system_extra=system_extra,
     )
     cache = tool_cache if tool_cache is not None else {}
     calls_done = 0
@@ -616,7 +695,7 @@ def _worker_with_tools(
         msg = chat(
             model,
             messages,
-            tools=_ALL_TOOLS,
+            tools=tool_list,
             gen=g,
             num_ctx=num_ctx,
             provider=provider,
@@ -644,6 +723,8 @@ def _worker_with_tools(
                         args = {"query": args}
                     elif name == "fetch_url":
                         args = {"url": args}
+                    elif name == "calculate":
+                        args = {"expression": args}
                     else:
                         args = {}
             if not isinstance(args, dict):
@@ -686,10 +767,15 @@ def _worker_plain(
     provider: str = "ollama",
     local_context: str | None = None,
     gen: GenOptions | None = None,
+    system_extra: str | None = None,
 ) -> str:
     g = worker_gen(gen)
     messages = _build_messages(
-        user_text, history, retry_hint, local_context=local_context
+        user_text,
+        history,
+        retry_hint,
+        local_context=local_context,
+        system_extra=system_extra,
     )
 
     if stream:
@@ -746,12 +832,13 @@ def _cli_status_printer(verbose: bool) -> StatusCallback:
         elif event == "worker":
             web = " + web" if payload.get("need_web") else ""
             local = " + time" if payload.get("need_local_time") else ""
+            calc = " + calc" if payload.get("need_calc") else ""
             attempt = payload.get("attempt") or 1
             suffix = f" (попытка {attempt})" if attempt > 1 else ""
             ctx = payload.get("num_ctx")
             hist = "hist" if payload.get("used_history") else "no-hist"
             ctx_s = f" ctx={ctx} {hist}" if ctx else ""
-            print(f"  [worker] {payload.get('model')}{web}{local}{suffix}{ctx_s}", flush=True)
+            print(f"  [worker] {payload.get('model')}{web}{local}{calc}{suffix}{ctx_s}", flush=True)
         elif event == "context":
             hist = "история" if payload.get("used_history") else "без истории"
             print(
@@ -769,8 +856,369 @@ def _cli_status_printer(verbose: bool) -> StatusCallback:
             )
         elif event == "restore":
             print(f"  [restore] лучший ответ: {payload.get('model')}", flush=True)
+        elif event == "plan":
+            print(
+                f"  [plan] need={payload.get('need_plan')} ({payload.get('reason')})",
+                flush=True,
+            )
+        elif event == "plan_ready":
+            n = len(payload.get("steps") or [])
+            print(
+                f"  [plan_ready] {payload.get('planner_model')} · {n} шагов: "
+                f"{payload.get('goal') or ''}",
+                flush=True,
+            )
+        elif event == "plan_step":
+            print(
+                f"  [plan_step] {payload.get('index')}/{payload.get('total')} "
+                f"{payload.get('title')} ({payload.get('tier')})",
+                flush=True,
+            )
+        elif event == "plan_step_done":
+            state = "fail" if payload.get("failed") else "ok"
+            print(
+                f"  [plan_step_done] {payload.get('id')} {state}",
+                flush=True,
+            )
+        elif event == "compose":
+            print(
+                f"  [compose] {payload.get('model')} ({payload.get('tier')})",
+                flush=True,
+            )
+        elif event == "plan_accepted":
+            print("  [plan] утверждён, выполняем шаги", flush=True)
+        elif event == "plan_rejected":
+            print(
+                f"  [plan] отклонён ({payload.get('reason')}), обычный ответ",
+                flush=True,
+            )
 
     return _print
+
+
+def _status_scoped(
+    on_status: StatusCallback | None,
+    scope: str,
+    **extra: Any,
+) -> StatusCallback | None:
+    if on_status is None:
+        return None
+
+    def _wrapped(event: str, payload: dict[str, Any]) -> None:
+        data = dict(payload)
+        data["scope"] = scope
+        for key, val in extra.items():
+            data.setdefault(key, val)
+        on_status(event, data)
+
+    return _wrapped
+
+
+def _step_token_cb(
+    on_status: StatusCallback | None, step_id: int
+) -> TokenCallback | None:
+    """Токены шага — в on_status(plan_token), не в публичный on_token склейки."""
+    if on_status is None:
+        return None
+
+    def _cb(text: str) -> None:
+        if text:
+            _emit(on_status, "plan_token", id=step_id, text=text)
+
+    return _cb
+
+
+def _step_tier(
+    hint: str,
+    *,
+    force_tier: Tier | None,
+    available: set[Tier],
+) -> Tier:
+    tier: Tier = hint if hint in ALL_TIERS else "mid"
+    if force_tier and force_tier in ALL_TIERS and _rank(tier) < _rank(force_tier):
+        tier = force_tier
+    return _fit_tier(tier, available)
+
+
+def _compose_tier(
+    start_tier: Tier,
+    *,
+    force_tier: Tier | None,
+    available: set[Tier],
+) -> Tier:
+    tier = start_tier if start_tier in ALL_TIERS else "mid"
+    if _rank(tier) < _rank("mid"):
+        tier = "mid"
+    if force_tier and force_tier in ALL_TIERS and _rank(tier) < _rank(force_tier):
+        tier = force_tier
+    return _fit_tier(tier, available)
+
+
+def _run_plan_pipeline(
+    user_text: str,
+    history: list[dict],
+    *,
+    decision: RouteDecision,
+    force_tier: Tier | None,
+    available: set[Tier],
+    installed: set[str],
+    stream: bool,
+    on_token: TokenCallback | None,
+    on_status: StatusCallback | None,
+    effective_gen: GenOptions,
+    on_plan_confirm: PlanConfirmCallback | None = None,
+) -> OrchestraResult | None:
+    """Декомпозиция. None — идём обычным воркером."""
+    if not plan_mod.ENABLED:
+        return None
+    verdict = plan_mod.decide_need_plan(user_text)
+    _emit(
+        on_status,
+        "plan",
+        need_plan=verdict.need_plan,
+        reason=verdict.reason,
+        source=verdict.source,
+    )
+    if not verdict.need_plan:
+        return None
+    planner = plan_mod.resolve_planner_model(installed)
+    max_steps = plan_mod.clamp_max_steps(plan_mod.MAX_STEPS)
+    built = plan_mod.build_plan(user_text, model=planner, max_steps=max_steps)
+    if built is None:
+        _emit(
+            on_status,
+            "plan",
+            need_plan=False,
+            reason="bad-json" if planner else "planner-missing",
+            source="fail-no",
+        )
+        return None
+    _emit(
+        on_status,
+        "plan_ready",
+        goal=built.goal,
+        planner_model=planner or "calc-block",
+        steps=built.to_meta(),
+        awaiting=True,
+    )
+    action = "approve"
+    if on_plan_confirm is not None:
+        try:
+            action = str(
+                on_plan_confirm(
+                    {
+                        "goal": built.goal,
+                        "planner_model": planner,
+                        "steps": built.to_meta(),
+                    }
+                )
+                or "reject"
+            ).strip().lower()
+        except Exception:  # noqa: BLE001
+            action = "reject"
+    if action != "approve":
+        _emit(on_status, "plan_rejected", reason=action or "reject")
+        return None
+    _emit(on_status, "plan_accepted")
+
+    step_results: list[dict[str, Any]] = []
+    step_meta: list[dict[str, Any]] = []
+    any_web = bool(decision.need_web)
+    skip_block: str | None = None
+    for i, step in enumerate(built.steps):
+        if skip_block and step.block == skip_block:
+            continue
+        skip_block = None
+        tier = _step_tier(step.tier_hint, force_tier=force_tier, available=available)
+        prompt = step.prompt
+        if step.block_role == "cpu" and step_results:
+            prev_text = str(step_results[-1].get("text") or "")
+            expr = pick_formula(prev_text)
+            if expr:
+                prompt = (
+                    f"{prompt}\n\nГотовое выражение для tool calculate:\n{expr}"
+                )
+        _emit(
+            on_status,
+            "plan_step",
+            index=i + 1,
+            total=len(built.steps),
+            id=step.id,
+            title=step.title,
+            tier=tier,
+            block=step.block or None,
+            block_title=step.block_title or None,
+            block_role=step.block_role or None,
+        )
+        extra = plan_mod.step_system_extra(built.goal, step_results)
+        if step.block_role == "formula":
+            extra = (
+                extra
+                + "\n\nЭтот шаг — только формула. Не считай число, не вызывай calculate."
+            )
+        step_status = _status_scoped(on_status, "step", step_id=step.id, id=step.id)
+        try:
+            step_res = handle(
+                prompt,
+                [],
+                force_tier=tier,
+                stream=stream,
+                verbose=False,
+                on_token=_step_token_cb(on_status, step.id) if stream else None,
+                on_status=step_status,
+                gen=effective_gen,
+                allow_plan=False,
+                system_extra=extra,
+                force_need_calc=bool(step.need_calc),
+                force_need_web=bool(step.need_web),
+            )
+        except Exception as exc:  # noqa: BLE001
+            note = str(exc)
+            step_results.append(
+                {
+                    "id": step.id,
+                    "title": step.title,
+                    "text": "",
+                    "failed": True,
+                    "note": note,
+                }
+            )
+            step_meta.append(
+                {
+                    "id": step.id,
+                    "title": step.title,
+                    "tier": tier,
+                    "model": "",
+                    "prompt": step.prompt,
+                    "text": "",
+                    "failed": True,
+                    "note": note,
+                    "block": step.block,
+                    "block_title": step.block_title,
+                    "block_role": step.block_role,
+                }
+            )
+            _emit(
+                on_status,
+                "plan_step_done",
+                id=step.id,
+                index=i + 1,
+                failed=True,
+                note=note,
+                tier=tier,
+                text="",
+                block=step.block or None,
+                block_title=step.block_title or None,
+                block_role=step.block_role or None,
+            )
+            if step.block_role == "formula":
+                skip_block = step.block
+            if i == 0:
+                break
+            continue
+        text = step_res.text or ""
+        if step.block_role == "cpu":
+            prev_text = str(step_results[-1].get("text") or "") if step_results else ""
+            text = ensure_computed(text, pick_formula(prev_text))
+        failed = (not text.strip()) or any(
+            p in {"empty", "error"} for p in (step_res.problems or [])
+        )
+        if step.block_role == "formula" and pick_formula(text):
+            failed = False
+        note = ", ".join(step_res.problems) if failed else ""
+        step_results.append(
+            {
+                "id": step.id,
+                "title": step.title,
+                "text": text,
+                "failed": failed,
+                "note": note,
+            }
+        )
+        step_meta.append(
+            {
+                "id": step.id,
+                "title": step.title,
+                "tier": step_res.tier,
+                "model": step_res.model,
+                "prompt": step.prompt,
+                "text": text,
+                "failed": failed,
+                "note": note,
+                "block": step.block,
+                "block_title": step.block_title,
+                "block_role": step.block_role,
+            }
+        )
+        _emit(
+            on_status,
+            "plan_step_done",
+            id=step.id,
+            index=i + 1,
+            failed=failed,
+            note=note,
+            model=step_res.model,
+            tier=step_res.tier,
+            text=text,
+            block=step.block or None,
+            block_title=step.block_title or None,
+            block_role=step.block_role or None,
+        )
+        any_web = any_web or step_res.need_web or step.need_web
+        if failed and step.block_role == "formula":
+            skip_block = step.block
+        if i == 0 and failed:
+            break
+
+    compose_tier = _compose_tier(
+        decision.tier, force_tier=force_tier, available=available
+    )
+    _emit(on_status, "compose", tier=compose_tier)
+    compose_extra = plan_mod.compose_system_extra(built.goal, step_results)
+    composed: OrchestraResult | None = None
+    try:
+        composed = handle(
+            user_text,
+            history,
+            force_tier=compose_tier,
+            stream=stream,
+            verbose=False,
+            on_token=on_token,
+            on_status=on_status,
+            gen=effective_gen,
+            allow_plan=False,
+            force_need_calc=False,
+            system_extra=compose_extra,
+        )
+    except Exception:  # noqa: BLE001
+        composed = None
+    if composed is None or not (composed.text or "").strip():
+        fallback = plan_mod.fallback_compose_text(step_results)
+        _emit_token(on_token, fallback)
+        return OrchestraResult(
+            text=fallback,
+            tier=compose_tier,
+            model=planner or "calc-block",
+            need_web=any_web,
+            route_reason=f"{decision.reason}+plan-fallback",
+            checked=False,
+            need_local_time=decision.need_local_time,
+            need_calc=decision.need_calc,
+            gen=effective_gen,
+            planned=True,
+            plan_goal=built.goal,
+            plan_steps=step_meta,
+        )
+    return replace(
+        composed,
+        planned=True,
+        plan_goal=built.goal,
+        plan_steps=step_meta,
+        route_reason=f"{decision.reason}+plan",
+        need_web=any_web,
+        need_local_time=decision.need_local_time,
+        need_calc=decision.need_calc,
+    )
 
 
 def handle(
@@ -794,6 +1242,11 @@ def handle(
     frequency_penalty: float | None = None,
     stop: list[str] | tuple[str, ...] | str | None = None,
     keep_alive: str | None = None,
+    allow_plan: bool = True,
+    system_extra: str | None = None,
+    on_plan_confirm: PlanConfirmCallback | None = None,
+    force_need_calc: bool | None = None,
+    force_need_web: bool | None = None,
 ) -> OrchestraResult:
     history = history or []
     app_settings.ensure_bootstrapped()
@@ -873,6 +1326,7 @@ def handle(
             reason=f"forced_model:{force_model}",
             reply="",
             need_local_time=need_local_time(user_text),
+            need_calc=need_calc(user_text),
         )
     elif force_tier:
         if force_tier not in ALL_TIERS:
@@ -890,6 +1344,7 @@ def handle(
             reason=f"forced:{force_tier}",
             reply="",
             need_local_time=need_local_time(user_text),
+            need_calc=need_calc(user_text),
         )
     else:
         if not available:
@@ -909,6 +1364,7 @@ def handle(
                     f"{decision.reason}+fit:{fitted}",
                     decision.reply if fitted == "tiny" else "",
                     need_local_time=decision.need_local_time,
+                    need_calc=decision.need_calc,
                 )
 
     def _resolve_entry(tier: Tier) -> dict[str, Any]:
@@ -944,6 +1400,7 @@ def handle(
         tier=decision.tier,
         need_web=decision.need_web,
         need_local_time=decision.need_local_time,
+        need_calc=decision.need_calc,
         reason=decision.reason,
         model=start_model_name,
         pool_id=start_entry.get("id"),
@@ -1015,6 +1472,7 @@ def handle(
                 checked=verdict.checked,
                 problems=list(verdict.problems),
                 need_local_time=decision.need_local_time,
+                need_calc=False,
                 gen=effective_gen,
             )
         mid = _fit_tier("mid", available)
@@ -1035,8 +1493,33 @@ def handle(
             decision.reason + " +recheck",
             "",
             need_local_time=decision.need_local_time,
+            need_calc=decision.need_calc,
         )
         lock_forced = False
+
+    if force_need_calc is not None:
+        decision = replace(decision, need_calc=bool(force_need_calc))
+    if force_need_web is not None:
+        decision = replace(decision, need_web=bool(force_need_web))
+
+    if allow_plan and not force_model and not attempts:
+        planned = _run_plan_pipeline(
+            user_text,
+            history,
+            decision=decision,
+            force_tier=force_tier,
+            available=available,
+            installed=installed,
+            stream=stream,
+            on_token=on_token,
+            on_status=on_status,
+            effective_gen=effective_gen,
+            on_plan_confirm=on_plan_confirm,
+        )
+        if planned is not None:
+            if stream and verbose:
+                print()
+            return planned
 
     current_entry = (
         forced_entry
@@ -1045,7 +1528,6 @@ def handle(
     )
     tier: Tier = str(current_entry.get("tier") or decision.tier)
     tool_cache: dict[str, str] = {}
-    local_ctx = local_context_block() if decision.need_local_time else None
 
     def _ctx_kwargs(entry: dict[str, Any]) -> dict[str, Any]:
         pct = entry.get("ctx_overhead_pct")
@@ -1060,7 +1542,13 @@ def handle(
             max_i = None
         return {"ctx_overhead_pct": pct_i, "max_ctx": max_i}
 
-    ctx_plan = plan_worker_context(user_text, history, tier, **_ctx_kwargs(current_entry))
+    ctx_plan = plan_worker_context(
+        user_text,
+        history,
+        tier,
+        system_extra=system_extra,
+        **_ctx_kwargs(current_entry),
+    )
     _emit_context(on_status, ctx_plan, tier)
     attempt_base = len(attempts)
 
@@ -1071,7 +1559,11 @@ def handle(
         attempt_no = attempt_base + attempt
         if attempt > 1:
             ctx_plan = plan_worker_context(
-                user_text, history, tier, **_ctx_kwargs(current_entry)
+                user_text,
+                history,
+                tier,
+                system_extra=system_extra,
+                **_ctx_kwargs(current_entry),
             )
             _emit_context(on_status, ctx_plan, tier)
         _emit(
@@ -1081,6 +1573,7 @@ def handle(
             provider=provider,
             need_web=decision.need_web,
             need_local_time=decision.need_local_time,
+            need_calc=decision.need_calc,
             tier=tier,
             pool_id=current_entry.get("id"),
             attempt=attempt_no,
@@ -1088,7 +1581,11 @@ def handle(
             used_history=ctx_plan.use_history,
         )
 
-        use_tools = decision.need_web and provider == "ollama"
+        tool_list = _tools_for(decision)
+        use_tools = bool(tool_list) and provider == "ollama"
+        local_ctx = _local_context_for(
+            decision, user_text, precompute=not use_tools
+        )
         if use_tools:
             text = _worker_with_tools(
                 model,
@@ -1102,21 +1599,31 @@ def handle(
                 provider=provider,
                 local_context=local_ctx,
                 gen=effective_gen,
+                system_extra=system_extra,
+                tools=tool_list,
             )
+            if decision.need_calc:
+                text = ensure_computed(text)
             _emit_token(on_token, text)
         else:
+            stream_now = bool(stream) and not decision.need_calc
             text = _worker_plain(
                 model,
                 user_text,
                 ctx_plan.history,
-                stream=stream,
-                on_token=on_token,
+                stream=stream_now,
+                on_token=on_token if stream_now else None,
                 retry_hint=retry_hint,
                 num_ctx=ctx_plan.num_ctx,
                 provider=provider,
                 local_context=local_ctx,
                 gen=effective_gen,
+                system_extra=system_extra,
             )
+            if decision.need_calc:
+                text = ensure_computed(text)
+            if stream and not stream_now:
+                _emit_token(on_token, text)
 
         review_model = _local_review_model(
             available_all,
@@ -1189,5 +1696,6 @@ def handle(
         used_history=best.ctx.use_history,
         context_reason=best.ctx.reason,
         need_local_time=decision.need_local_time,
+        need_calc=decision.need_calc,
         gen=effective_gen,
     )
