@@ -1,0 +1,144 @@
+:root {
+  --bg: #0f0f10;
+  --bg-sidebar: #141415;
+  --bg-elevated: #1a1a1c;
+  --bg-hover: #222224;
+  --bg-input: #1c1c1e;
+  --border: #2a2a2d;
+  --border-soft: #232326;
+  --text: #e8e8ea;
+  --text-dim: #9a9aa0;
+  --text-faint: #6b6b72;
+  --accent: #4a9eff;
+  --accent-dim: #2d6cb5;
+  --user-bg: #252528;
+  --danger: #e06c75;
+  --ok: #7ec699;
+  --warn: #d4a574;
+  --radius: 8px;
+  --font: "Segoe UI", "SF Pro Text", system-ui, sans-serif;
+  --mono: "Cascadia Code", "Consolas", "SF Mono", monospace;
+  --scrollbar-size: 10px;
+  --scrollbar-thumb: #3e3e44;
+  --scrollbar-thumb-hover: #55555e;
+  --scrollbar-track: transparent;
+  --panel-width: 300px;
+  --chart-gpu: #4a9eff;
+  --chart-vram: #7ec699;
+  --chart-temp-gpu: #f0a050;
+  --chart-temp-mem: #e8c96a;
+  --chart-ram: #d4a574;
+  --chart-cpu: #e06c75;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* Scrollbars — Firefox + WebKit (чаты, код, таблицы, модалки) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+select,
+textarea,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 260px 1fr 4px var(--panel-width);
+  height: 100%;
+  min-height: 100vh;
+}
+
+.app.panel-collapsed {
+  grid-template-columns: 260px 1fr 0 40px;
+}
+
+.app.panel-collapsed .panel-resizer {
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.app.panel-collapsed .monitor-controls,
+.app.panel-collapsed .monitor-scroll,
+.app.panel-collapsed .monitor-title {
+  display: none;
+}
+
+.app.panel-collapsed .monitor-header {
+  border-bottom: none;
+  padding: 10px 4px;
+  justify-content: center;
+}
+
+.app.panel-collapsed .monitor-panel {
+  overflow: hidden;
+}
+
+.app.resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.app.resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+.app.spark-resizing {
+  cursor: ns-resize;
+  user-select: none;
+}
+
+.app.spark-resizing * {
+  cursor: ns-resize !important;
+  user-select: none !important;
+}
+

@@ -423,6 +423,17 @@ def apply_inline_calculate(text: str) -> str:
     return CALC_LINE_RE.sub(_repl, text or "")
 
 
+def direct_calc_text(user_text: str) -> str | None:
+    """Готовый ответ CPU, если выражение уже есть в запросе."""
+    formula = pick_formula(user_text)
+    if not formula:
+        return None
+    value = try_eval(formula)
+    if value is None:
+        return None
+    return f"{preprocess(formula)} = {format_number(value)}"
+
+
 def calc_context_block(user_text: str) -> str | None:
     """Фрагмент system: готовые результаты с CPU, если выражение удалось вынуть."""
     pairs = extract_evals(user_text)

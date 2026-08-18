@@ -1,0 +1,363 @@
+/* Main */
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.main-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.chat-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 20px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.messages:empty::before {
+  content: "Начните диалог с оркестром Qwen";
+  margin: auto;
+  color: var(--text-faint);
+  font-size: 14px;
+}
+
+.msg {
+  max-width: 780px;
+  width: 100%;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.msg-role {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.msg.user .msg-role {
+  color: var(--accent);
+}
+
+.msg-body {
+  word-break: break-word;
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.msg > .msg-body:empty {
+  display: none;
+}
+
+.msg-body .katex {
+  font-size: 1.05em;
+  color: var(--text);
+}
+
+.msg-body .katex-display {
+  margin: 0.75em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.15em 0;
+}
+
+.msg-body > :first-child {
+  margin-top: 0;
+}
+
+.msg-body > :last-child {
+  margin-bottom: 0;
+}
+
+.msg-body p {
+  margin: 0 0 0.75em;
+}
+
+.msg-body p:last-child {
+  margin-bottom: 0;
+}
+
+.msg-body h1,
+.msg-body h2,
+.msg-body h3,
+.msg-body h4,
+.msg-body h5,
+.msg-body h6 {
+  margin: 1em 0 0.45em;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+}
+
+.msg-body h1 {
+  font-size: 1.35em;
+}
+
+.msg-body h2 {
+  font-size: 1.2em;
+}
+
+.msg-body h3 {
+  font-size: 1.08em;
+}
+
+.msg-body h4,
+.msg-body h5,
+.msg-body h6 {
+  font-size: 1em;
+}
+
+.msg-body ul,
+.msg-body ol {
+  margin: 0.4em 0 0.75em;
+  padding-left: 1.45em;
+}
+
+.msg-body li {
+  margin: 0.2em 0;
+}
+
+.msg-body li > p {
+  margin: 0.2em 0;
+}
+
+.msg-body blockquote {
+  margin: 0.65em 0;
+  padding: 0.15em 0 0.15em 0.9em;
+  border-left: 3px solid var(--border);
+  color: var(--text-dim);
+}
+
+.msg-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}
+
+.msg-body a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.msg-body a:hover {
+  text-decoration: underline;
+}
+
+.msg-body code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+.msg-body .code-block {
+  margin: 0.65em 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.msg-body .code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 8px 4px 12px;
+  background: #161618;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.msg-body .code-lang {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-body .code-lang:empty,
+.msg-body .code-lang[hidden] {
+  display: none;
+}
+
+.msg-body .code-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.msg-body .code-copy:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.msg-body .code-copy.copied {
+  color: var(--ok);
+}
+
+.msg-body .code-copy svg {
+  display: block;
+}
+
+.msg-body .code-block pre {
+  margin: 0;
+  padding: 12px 14px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}
+
+.msg-body pre {
+  margin: 0.65em 0;
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}
+
+.msg-body pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.msg-body .code-block pre code.hljs,
+.msg-body pre code.hljs {
+  background: transparent;
+  padding: 0;
+  color: var(--text);
+}
+
+.msg-body .md-table-wrap {
+  display: block;
+  width: 100%;
+  margin: 0.65em 0;
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}
+
+.msg-body table {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+  border-collapse: collapse;
+}
+
+.msg-body th,
+.msg-body td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.msg-body th {
+  background: var(--bg-elevated);
+  font-weight: 600;
+}
+
+.msg-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+}
+
+.msg.user .msg-body {
+  background: var(--user-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+.msg-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.chip.accent {
+  color: var(--accent);
+  border-color: #2a4a6e;
+}
+
+.chip.warn {
+  color: var(--warn);
+  border-color: #5a4530;
+}
+
+.tool-line {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-faint);
+  padding: 4px 0;
+}
+
+.msg-plan-stack:empty,
+.msg-tools:empty {
+  display: none;
+}
+
+.msg-plan-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 4px;
+}

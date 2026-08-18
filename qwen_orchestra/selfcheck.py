@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from .calc import CALC_VERB_RE, extract_evals, format_number, try_eval
 from .llm import chat
+from .selfcheck_hints import HINTS, SEVERITY
 
 # Скрипты письма: CJK (яп/кит/кор), кириллица, латиница
 _CJK_RE = re.compile(
@@ -132,44 +133,6 @@ _MATH_QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 
-HINTS: dict[str, str] = {
-    "language": "Прошлый ответ был не на языке вопроса. Ответь строго на языке пользователя.",
-    "cjk": (
-        "В прошлом ответе появились иероглифы (китайский/японский). "
-        "Ответь строго на языке вопроса, без иероглифов."
-    ),
-    "empty": "Прошлый ответ был пустым. Дай содержательный ответ по существу вопроса.",
-    "too_short": "Прошлый ответ был слишком коротким. Раскрой ответ полнее и по делу.",
-    "refusal": (
-        "Прошлый ответ был отказом. Выполни запрос по существу: "
-        "если данных не хватает — дай лучший возможный ответ и укажи допущения."
-    ),
-    "uncertain": (
-        "Прошлый ответ был неуверенным. Дай конкретный ответ; "
-        "если есть варианты — назови самый вероятный и почему."
-    ),
-    "repetition": "Прошлый ответ зацикливался. Напиши ответ один раз, без повторов.",
-    "truncated": "Прошлый ответ обрывался. Дай законченный ответ, закрой блоки кода.",
-    "error": "В прошлом ответе была явная ошибка. Перепроверь факты и вычисления.",
-    "irrelevant": "Прошлый ответ был не по вопросу. Ответь именно на заданный вопрос.",
-    "incomplete": "Прошлый ответ отвечал лишь частично. Закрой все части вопроса.",
-}
-
-# Вес проблемы при выборе лучшей из неудачных попыток
-SEVERITY: dict[str, int] = {
-    "empty": 5,
-    "cjk": 4,
-    "language": 4,
-    "error": 4,
-    "refusal": 3,
-    "repetition": 3,
-    "irrelevant": 3,
-    "truncated": 2,
-    "incomplete": 1,
-    "too_short": 1,
-    "uncertain": 1,
-}
-
 REVIEW_MODEL_DEFAULT = "qwen3.5:4b"
 
 REVIEW_SCHEMA = {
@@ -209,7 +172,13 @@ class Verdict:
     @property
     def hint(self) -> str:
         parts = [HINTS[p] for p in self.problems if p in HINTS]
-        if self.note and self.note not in {"reviewed", "rules-only", "math-verified", "review-error"}:
+        if self.note and self.note not in {
+            "reviewed",
+            "rules-only",
+            "math-verified",
+            "math-patched",
+            "review-error",
+        }:
             parts.append(self.note)
         return " ".join(parts) or HINTS["error"]
 
@@ -281,7 +250,29 @@ def arithmetic_problems(user_text: str, answer: str) -> tuple[list[str], str, bo
     return [], "", verified
 
 
-def _math_only_question(user_text: str) -> bool:
+def patch_math_answer(user_text: str, answer: str) -> str | None:
+    """Подставить верное число с CPU вместо эскалации. None — патчить нечего."""
+    pairs = extract_evals(user_text)
+    if not pairs:
+        return None
+    body = answer or ""
+    missing: list[tuple[str, str]] = []
+    for expr, shown in pairs:
+        value = _eval_expr(expr)
+        if value is None:
+            continue
+        if not _mentions_number(body, value):
+            missing.append((expr, shown))
+    if not missing:
+        return None
+    if is_math_only_question(user_text):
+        expr, shown = missing[-1]
+        return f"{expr} = {shown}"
+    extra = "\n".join(f"{expr} = {shown}" for expr, shown in missing)
+    return body.rstrip() + "\n\n" + extra
+
+
+def is_math_only_question(user_text: str) -> bool:
     """Вопрос почти целиком про вычисление — без доп. частей вроде «и объясни»."""
     rest = user_text or ""
     for expr, _ in extract_evals(rest):
@@ -290,6 +281,9 @@ def _math_only_question(user_text: str) -> bool:
     rest = _MATH_QUESTION_RE.sub(" ", rest)
     rest = re.sub(r"[\s.,;:!?()\-+=*/×xх^%]+", " ", rest, flags=re.IGNORECASE).strip()
     return len(rest) < 16
+
+
+_math_only_question = is_math_only_question
 
 
 def _has_loop(text: str) -> bool:
@@ -466,7 +460,7 @@ def check(
     math_problems, math_note, math_verified = arithmetic_problems(user_text, answer)
     if math_problems:
         return Verdict(False, math_problems, math_note)
-    if math_verified and _math_only_question(user_text):
+    if math_verified and is_math_only_question(user_text):
         return Verdict(True, note="math-verified")
 
     if use_llm and model and len(answer.strip()) >= 40:
