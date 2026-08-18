@@ -3,7 +3,6 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Ollama](https://img.shields.io/badge/Ollama-local%20LLM-000000)](https://ollama.com)
 [![FastAPI](https://img.shields.io/badge/FastAPI-SSE%20чат-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
 Локальный оркестр LLM: несколько моделей [Qwen](https://ollama.com/library/qwen3.5) работают как одна система. Роутер выбирает тир под задачу, воркер отвечает, selfcheck отбраковывает слабый ответ и поднимает модель сильнее.
 
@@ -133,9 +132,3 @@ python open_web.py
 | [docs/SDK_FOR_AGENTS.md](docs/SDK_FOR_AGENTS.md) | Шпаргалка в чужой `.cursor/rules/` |
 | [AGENTS.md](AGENTS.md) | Карта кода и правила для AI-агентов этого репо |
 | [THANKS_NEURAL_NETS.md](THANKS_NEURAL_NETS.md) | Благодарность нейронкам |
-
----
-
-## Лицензия
-
-Код — MIT. Модели Qwen — по их лицензиям через Ollama / провайдера.
