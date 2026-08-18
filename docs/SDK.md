@@ -48,7 +48,7 @@ print(result.model, result.tier, result.gen)
 4. **`force_model`** — это **id записи пула** (`"ollama:qwen3.5:4b"`, `"openrouter:anthropic/claude-sonnet-4"`), не сырое имя модели Ollama/OR.
 5. **История** в `ask(history=…)` — **без** текущего user-сообщения. Формат: `[{"role":"user"|"assistant","content":"..."}, ...]`.
 6. В ботах всегда `verbose` уже выключен у `Client.ask`; стрим — через `on_token` / `on_status`, не через print.
-7. **Tools** (`web_search`, `fetch_url`, `calculate`) работают **только у Ollama-воркера**. У OpenRouter tools нет: счёт — предрасчёт в system или строка `CALCULATE:` после ответа.
+7. **Tools** (`web_search`, `fetch_url`, `calculate`) работают **только у Ollama-воркера**. У OpenRouter tools нет: счёт — предрасчёт в system или строка `CALCULATE:` после ответа. При `need_web` в system всегда снимок часов ПК.
 8. Ключ OpenRouter: env `OPENROUTER_API_KEY` **или** `client.set_openrouter_api_key(...)` → `secrets.json` рядом с settings. Не коммить ключ.
 9. Health: `ok=true`, если ≥1 модель пула доступна (Ollama pull’нута **или** OpenRouter с ключом). `missing` — критичные дыры для Auto.
 10. Не вызывай низкоуровневые модули (`orchestra.handle`, `llm.chat`) из чужого проекта без нужды — контракт = `Client`.
@@ -247,6 +247,7 @@ class OrchestraResult:
     planned: bool = False
     plan_goal: str = ""
     plan_steps: list[dict]     # [{id, title, tier, model, prompt, text}]
+    elapsed_ms: int = 0        # от старта handle до результата
 ```
 
 Метаданные относятся к **выбранной** (лучшей/успешной) попытке.
@@ -519,7 +520,7 @@ result = client.ask(
 assert "".join(buf) == result.text or True  # при retry UI может очищать текст
 ```
 
-События `on_status` (поля в `payload` зависят от фазы):
+События `on_status` (поля в `payload` зависят от фазы; на всех есть `elapsed_ms` и `dt_ms`):
 
 | event | Когда |
 |-------|--------|
@@ -534,9 +535,9 @@ assert "".join(buf) == result.text or True  # при retry UI может очи�
 | `context` | `num_ctx`, `used_history`, `context_reason` |
 | `worker` | старт воркера на модели |
 | `tool` | вызов web-tool (Ollama) |
-| `selfcheck` | результат проверки |
+| `selfcheck` | результат проверки (`elapsed_ms`, `dt_ms` — на всех событиях) |
 | `retry` | ответ забракован, escalate (`scope=step` — внутри шага плана) |
-| `restore` | возврат лучшей из неудачных попыток |
+| `restore` | возврат лучшей из неудачных попыток **или** патч арифметики (`reason=math-patch`) |
 
 При `retry` / `restore` **без** `scope=step` потребитель стрима должен уметь **сбросить** уже показанный текст (как UI чата). Токены шагов плана в `on_token` не приходят — только сборка.
 
@@ -630,7 +631,7 @@ def assert_orchestra_ready(client: Client) -> None:
 - Tools (поиск/URL) — только Ollama.
 - Чаты веб-UI in-memory; SDK историю **не** хранит — храни в своём боте.
 - Qwen3.5 вызывается с `think: false` внутри llm-слоя.
-- Точный tokenizer нет: `num_ctx` по эвристике символов.
+- Точный tokenizer нет: `num_ctx` по эвристике (кириллица ~3 симв./токен, латиница ~4, CJK ~1).
 - GPU-метрики в пакете есть (`metrics`), но боту обычно не нужны.
 
 ---
@@ -658,15 +659,15 @@ def assert_orchestra_ready(client: Client) -> None:
 | Путь | Роль |
 |------|------|
 | `qwen_orchestra/client.py` | публичный `Client` |
-| `qwen_orchestra/orchestra.py` | `handle`, `OrchestraResult` |
-| `qwen_orchestra/plan.py` | декомпозиция: need_plan, JSON-шаги, сборка |
-| `qwen_orchestra/router.py` | `route`, `RouteDecision`, floor/ceiling |
-| `qwen_orchestra/settings.py` | пул, secrets, bootstrap |
+| `qwen_orchestra/orchestra.py` | фасад: `handle`, `OrchestraResult` (цикл в `orch_*.py`) |
+| `qwen_orchestra/plan.py` | декомпозиция: need_plan, JSON-шаги, сборка (`plan_detect.py`) |
+| `qwen_orchestra/router.py` | `route`, `RouteDecision`, floor/ceiling (`router_detect.py`) |
+| `qwen_orchestra/settings.py` | пул, secrets, bootstrap (`settings_*.py`) |
 | `qwen_orchestra/llm.py` | Ollama + OpenRouter HTTP |
-| `qwen_orchestra/selfcheck.py` | проверка ответа |
+| `qwen_orchestra/selfcheck.py` | проверка ответа (`selfcheck_hints.py`) |
 | `qwen_orchestra/tools_web.py` | web_search / fetch_url |
 | `qwen_orchestra/tools_local.py` | время ПК |
-| `qwen_orchestra/calc.py` | прямой счёт на CPU (`calculate`) |
+| `qwen_orchestra/calc.py` | прямой счёт на CPU (`calculate`, `direct_calc_text`) |
 | `examples/ask_sdk.py` | минимальный пример |
 | `examples/ask_sdk_bot.py` | шаблон под бота (локально + OR) |
 

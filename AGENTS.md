@@ -32,23 +32,23 @@
 |---|---|
 | `qwen_orchestra/` | Устанавливаемый пакет (`pip install -e .`): ядро оркестра |
 | `qwen_orchestra/client.py` | Публичный `Client`: ask / route / health / settings |
-| `qwen_orchestra/orchestra.py` | `handle()`, `plan_worker_context()`, цикл попыток, tools, колбэки |
-| `qwen_orchestra/plan.py` | Нужен ли план, JSON-шаги, сжатие итогов, сборка |
-| `qwen_orchestra/settings.py` | Слоты + промпты (`settings.json`); OpenRouter key (`secrets.json` / env); lazy bootstrap |
-| `qwen_orchestra/router.py` | Роутер + `tier_floor` / `tier_ceiling`; SYSTEM из settings |
-| `qwen_orchestra/selfcheck.py` | Самопроверка ответа: правила + LLM-ревью на mid (4b) |
+| `qwen_orchestra/orchestra.py` | Фасад: `handle()`, `plan_worker_context()`, константы; цикл в `orch_*.py` |
+| `qwen_orchestra/plan.py` | План: типы, промпты, сборка; эвристика в `plan_detect.py` |
+| `qwen_orchestra/settings.py` | Load/save/bootstrap пула (`settings.json` / `secrets.json`); типы в `settings_*.py` |
+| `qwen_orchestra/router.py` | `route()`, SYSTEM; floor/web/meaningful в `router_detect.py` |
+| `qwen_orchestra/selfcheck.py` | Самопроверка ответа; `HINTS` / `SEVERITY` в `selfcheck_hints.py` |
 | `qwen_orchestra/llm.py` | Клиент Ollama + OpenRouter (`provider`, `think: false` для Qwen3.5) |
 | `qwen_orchestra/metrics.py` | CPU/RAM/GPU/температуры + Ollama `/api/ps` |
 | `qwen_orchestra/tools_web.py` | `web_search`, `fetch_url` |
 | `qwen_orchestra/tools_local.py` | локальные данные ПК: `get_local_time`, снимок даты/времени |
-| `qwen_orchestra/calc.py` | прямой счёт на CPU: `calculate`, `need_calc` |
+| `qwen_orchestra/calc.py` | прямой счёт на CPU: `calculate`, `need_calc`, `direct_calc_text` |
 | `orchestra.py` / `router.py` / … | Shim-модули для старых импортов |
 | `orchestra_chat.py` | CLI оркестра |
 | `ask_orchestra.py` | Один вопрос через оркестр |
 | `chat.py` / `ask_once.py` | Только mid (4b), без оркестра |
 | `chat_web.py` / `ask_web.py` | Только mid + web tools |
-| `server.py` | FastAPI: статика + API чатов + SSE + `/api/settings` + `/api/metrics` |
-| `web/` | UI: `index.html`, `styles.css`, `app.js` (чат + правая панель монитора) |
+| `server.py` | FastAPI: статика + CRUD чатов + health/settings; SSE в `server_sse.py`, вход в `server_run.py` |
+| `web/` | UI: `index.html`, `styles.css` + `css/`, вход `js/main.js` (чат + монитор) |
 | `web/vendor/` | Фронт-библиотеки: marked, DOMPurify, highlight.js, KaTeX (+ тема/шрифты) |
 | `open_web.py` | Лаунчер: старт сервера + открытие браузера |
 | `examples/ask_sdk.py` | Минимальный пример `Client` |
@@ -107,15 +107,15 @@ user → route → need_plan? → (planner → шаги → compose) | worker (�
 - Тиры (семантика роутера): **10 фиксированных** id: `tiny` / `nano` / `small` / `mid` / `large` / `heavy` / `xlarge` / `coder` / `ultra` / `frontier`.
 - Пул в `settings.json` → `models[]` (старый `slots[]` мигрирует при загрузке).
 - Обязательных тиров нет: health ok при ≥1 доступной модели пула; недоступные — в `missing_optional`.
-- Промпты роутера — per-model `router_prompt` у записей с тиром; собираются в `router.SYSTEM`.
+- Промпты роутера — per-model `router_prompt` у записей с тиром; собираются в `router.SYSTEM`. JSON-схема `tier.enum` — из тиров пула (`build_route_schema`).
 - Эскалация: следующая available-модель с **большим rank**.
 - UI: пул, тир/rank, OpenRouter-ключ, промпты, селект **модели планировщика**, тумблер плана; «Добавить в пул» / «Удалить» из пула.
 - Публичный вход: `orchestra.handle(..., force_tier=…, force_model=…, stream=…, verbose=…, on_token=…, on_status=…)`.
 - История в `handle` **без** текущего user-сообщения (сервер так и передаёт; CLI тоже; если хвост дублирует вопрос — он снимается).
 - Для веба/SSE **не** печатать в stdout: `verbose=False` + колбэки.
-- События `on_status`: `route`, `plan`, `plan_ready`, `plan_accepted`, `plan_rejected`, `plan_step`, `plan_token`, `plan_step_done`, `compose`, `context`, `worker`, `tool`, `selfcheck`, `retry`, `restore`.
+- События `on_status`: `route`, `plan`, `plan_ready`, `plan_accepted`, `plan_rejected`, `plan_step`, `plan_token`, `plan_step_done`, `compose`, `context`, `worker`, `tool`, `selfcheck`, `retry`, `restore`. В каждом payload — `elapsed_ms` (от старта `handle`) и `dt_ms` (от прошлого события).
 - `force_model` — id записи пула; `force_tier` — лучшая available-модель тира (compat). Ручной `force_model` **без плана**.
-- `OrchestraResult`: `text`, `tier`, `model`, `need_web`, `need_local_time`, `need_calc`, `route_reason`, `escalated`, `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason`, `gen`, `planned`, `plan_goal`, `plan_steps` (метаданные — от **выбранной** попытки / сборки; `gen` — применённый сэмплинг воркера; в `plan_steps` для UI могут быть `prompt`/`text`).
+- `OrchestraResult`: `text`, `tier`, `model`, `need_web`, `need_local_time`, `need_calc`, `route_reason`, `escalated`, `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason`, `gen`, `planned`, `plan_goal`, `plan_steps`, `elapsed_ms` (метаданные — от **выбранной** попытки / сборки; `gen` — применённый сэмплинг воркера; в `plan_steps` для UI могут быть `prompt`/`text`).
 
 ## Auto-режим: когда какая модель
 
@@ -144,14 +144,15 @@ user → route → need_plan? → (planner → шаги → compose) | worker (�
   floor `mid`/`heavy`/`coder`. tiny остаётся для неоднозначных коротких запросов.
 - `need_web` — детерминированно (`need_web()` / hard+soft ключи, в т.ч. «поищи»,
   «погугли»); при `force_tier` / `force_model` LLM-роутер **не** вызывается.
-- `need_local_time` — только решение tiny (`need_local_time()` / JSON-классификатор),
-  без regex. Критерий широкий: любое упоминание времени/даты/«сейчас» → true
-  (даже если часы могут не пригодиться). При true в system воркера — снимок
-  часов/даты/TZ с ПК (`tools_local`); чип UI «время ПК».
+  Вместе с поиском в system воркера **всегда** снимок часов ПК (`need_local_time`).
+- `need_local_time` — tiny (`need_local_time()` / JSON-классификатор), без regex,
+  **либо** автоматически при `need_web`. Критерий tiny широкий: любое упоминание
+  времени/даты/«сейчас» → true. При true в system — снимок часов/даты/TZ с ПК
+  (`tools_local`); чип UI «время ПК».
 - `need_calc` — детерминированно (`calc.need_calc`): «посчитай/вычисли», сложный процент /
   аннуитет, выражение с `+ * / **` или минусом **с пробелами**, проценты, два+ числа
-  со «сколько». Auto → план с блоком «Формула» + «Счёт ПК»; во втором пункте tool
-  `calculate` (безопасный AST на CPU). Чип UI «счёт ПК». Без tools (OpenRouter) —
+  со «сколько». Если `pick_formula` видит выражение — CPU сразу (`calc-direct`), без плана;
+  иначе план с блоком «Формула» + «Счёт ПК». Чип UI «счёт ПК». Без tools (OpenRouter) —
   предрасчёт или строка `CALCULATE:`. Модель не считает в уме.
 - `ok=false` от tiny **игнорируется**, если запрос осмысленный (`looks_meaningful`):
   есть слова с гласными или простая арифметика. Пустой ввод и «??» отклоняются сразу,
@@ -166,17 +167,20 @@ user → route → need_plan? → (planner → шаги → compose) | worker (�
 решают `need_plan`. Один вопрос / одна тема («какого цвета яблоки?») — **не** план.
 Два независимых атомарных вопроса в одном сообщении (курс доллара **и** описание
 одуванчика, даже без `?`) — да; так же список 2+ пунктов, 2+ вопроса или «по шагам».
-**Расчёт** (`need_calc`) всегда идёт в план: неделимый блок «Формула» → «Счёт ПК»
-(tool `calculate` только во втором пункте). В UI блок с рамкой `ƒx`. Планировщик
-LLM для голого счёта не нужен. `force_model` план отключает.
+**Расчёт** (`need_calc`): если `pick_formula` достаёт выражение из запроса — ответ CPU
+сразу (`direct_calc_text`), без плана; иначе неделимый блок «Формула» → «Счёт ПК»
+(tool `calculate` только во втором пункте; если формула уже в тексте — только «Счёт ПК»).
+В UI блок с рамкой `ƒx`. Планировщик LLM для голого счёта не нужен. `force_model` план отключает.
 
 При готовом плане UI показывает сворачиваемое окно плана и ждёт **утверждения**
 (`POST /api/chats/{id}/plan` `{action: approve|reject}`). Reject / таймаут → один воркер.
-Утверждённые шаги — вложенный `handle(..., allow_plan=False)` **со стримом** в отдельное
-окно пункта (потом сворачивается до заголовка). Сборка стримится в тело сообщения.
+Утверждённые шаги — вложенный `handle(..., allow_plan=False, installed=…, force_need_*)`
+**со стримом** в отдельное окно пункта (потом сворачивается до заголовка). Tiny-классификаторы
+на шаге не зовутся: флаги `force_need_web` / `force_need_calc` / `force_need_local_time`.
+Не-calc шаги получают короткий хвост истории чата. Сборка стримится в тело сообщения.
 `on_token` — только склейка; токены шага — `on_status("plan_token")`.
 `on_plan_confirm` в SDK; без колбэка план выполняется сразу.
-История для модели — только склейка. `retry`/`restore` шага — `scope=step`.
+История для модели на склейке — полная (как у обычного воркера). `retry`/`restore` шага — `scope=step`.
 
 ## Контекст и VRAM
 
@@ -194,7 +198,7 @@ num_ctx = min(ceiling, max(256, ceil_256(base * (1 + ctx_overhead_pct/100))))
 
 | Кусок | Значение |
 |---|---|
-| `tokens(промпт)` | system + история + user; оценка ~2 символа/токен (завышена для RU/кода) |
+| `tokens(промпт)` | system + история + user; кириллица ~3 симв./токен, латиница ~4, CJK ~1 |
 | `template` | 128 (chat-шаблон / спецтокены) |
 | `reserve_ответа` | 512 короткий (< 48 символов) / 768 обычный / 1536 код (`coder` или признаки кода) |
 | `safety` | `max(128, ~10% от суммы трёх кусков выше)` |
@@ -222,7 +226,7 @@ max ctx tiny/nano/small `4096`, остальные без потолка (8192).
 
 ## Самопроверка (`selfcheck.py`)
 
-После каждого ответа запускается `selfcheck.check()`:
+После каждого ответа запускается `selfcheck.check()` (`HINTS` / `SEVERITY` — `selfcheck_hints.py`):
 
 1. **Быстрые правила** (без модели):
    `cjk` (ушёл в иероглифы), `language` (не язык вопроса), `empty`, `too_short`,
@@ -235,12 +239,14 @@ max ctx tiny/nano/small `4096`, остальные без потолка (8192).
    При `flag_irrelevant=false` — не бракует problem=`irrelevant`.
 2. **Арифметика** (`arithmetic_problems`): если в вопросе есть «сколько / посчитай /
    вычисли» и выражение, оно считается через `ast` и сверяется с ответом.
-   Расхождение → `error`, а в `hint` уходит правильное значение. Совпало →
+   Расхождение → `error`; оркестр **патчит** число через `patch_math_answer` (без
+   эскалации), `restore` + `note=math-patched`. Совпало →
    ответ считается проверенным, LLM-ревью пропускается (оно тут только шумит).
-3. **LLM-ревью** на 3b (`SELFCHECK_LLM`), если предыдущее прошло:
-   `irrelevant`, `error`, `incomplete`. Ревьюер оценивает только существо, не стиль.
+3. **LLM-ревью**, если предыдущее прошло и есть куда эскалировать:
+   `irrelevant`, `error`, `incomplete`. Ревьюер — та же Ollama-модель, что воркер,
+   если её тир ≥ mid (без выгрузки 9b ради 4b); иначе mid из пула.
    `num_ctx` ревьюера — 4096. При сбое ревьюера `ok=true`, но `checked=false`
-   (`note=review-error`). Ревью запускается и на последней попытке (без дальнейшего retry).
+   (`note=review-error`). На последней попытке (нет старшей модели) — только правила.
 
 Не прошло → запрос **переделывается** на модели уровнем выше, до `MAX_ATTEMPTS`
 (по умолчанию 3). Правка (`Verdict.hint`) идёт в **system** (`RETRY_SYSTEM`), а не
@@ -283,7 +289,7 @@ SSE events: `meta`, `token`, `tool`, `check`, `done`, `error`.
 - `token`: `{text}` — склейка; `{text, scope:"step", id}` — стрим пункта плана.
 - `meta` также может нести `num_ctx`, `used_history`, `context_reason`, `planned`, `plan_goal`, `plan_steps`.
 - `check`: `{ok, problems, note, attempt, model, checked}` — результат самопроверки.
-- `done`: `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason`, `planned`, `plan_goal`, `plan_steps`.
+- `done`: `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason`, `planned`, `plan_goal`, `plan_steps`, `elapsed_ms`.
 
 Middleware (локальный режим): только Host `127.0.0.1`/`localhost` (+порт); для мутаций — Origin localhost (DNS rebinding).
 Режим **`--share`** / `QWEN_SHARE=1`: bind `0.0.0.0`, Host/Origin не режутся; опционально `QWEN_SHARE_TOKEN` / `--token` — HTTP Basic (пароль = токен; `/api/ready` без пароля для лаунчера). Публичный URL гостя — из `share.json` (`public_ip` + `port`; IP можно обновить автодетектом). Один общий сеанс (не multi-user). Лаунчер `open_web.py` спрашивает режим при старте (`--local` / `--share`).
@@ -352,13 +358,13 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 
 1. **Переиспользовать** `qwen_orchestra.Client` / `orchestra.handle` — не дублировать роутинг в `server.py`.
 2. Стрим в UI — только через колбэки оркестра + SSE.
-3. Новые проверки ответа — в `qwen_orchestra/selfcheck.py` (код проблемы + текст в `HINTS`);
-   жёсткий floor/ceiling — в `router.tier_floor` / `tier_ceiling`;
+3. Новые проверки ответа — в `qwen_orchestra/selfcheck.py` (код проблемы + текст в `selfcheck_hints.HINTS`);
+   жёсткий floor/ceiling — в `router.tier_floor` / `tier_ceiling` (код в `router_detect.py`);
    тексты «когда модель» для LLM-роутера и пул моделей — в `settings.py` / UI;
-   размер окна / история — в `plan_worker_context` / связанные хелперы в `orchestra.py`;
+   размер окна / история — в `plan_worker_context` (`orch_ctx.py`, реэкспорт из `orchestra.py`);
    локальные данные ПК — в `tools_local.py` + детектор в `router.need_local_time`;
-   прямой счёт — в `qwen_orchestra/calc.py` + `need_calc`;
-   декомпозиция — в `qwen_orchestra/plan.py` (промпты и `planner_model` — settings/UI).
+   прямой счёт — в `qwen_orchestra/calc.py` + `need_calc` / `direct_calc_text`;
+   декомпозиция — в `qwen_orchestra/plan.py` + `plan_detect.py` (промпты и `planner_model` — settings/UI).
 4. Лаунчер readiness — только `/api/ready`; тяжёлые проверки Ollama — в `/api/health`.
 5. По умолчанию слушать `127.0.0.1`; `0.0.0.0` — только через явный `--share` / `QWEN_SHARE` (не делать share режимом по умолчанию).
 6. Не добавлять светлую тему / аккаунты / IDE без запроса.

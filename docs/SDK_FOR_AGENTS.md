@@ -27,7 +27,7 @@ result = client.ask(
 - Роутер и selfcheck — **локальные** Ollama (всегда `temperature=0`); OpenRouter только как воркер.
 - Сэмплинг воркера — через `ask(temperature=…)`, `top_p`, `seed`, `num_predict`, `stop`, `keep_alive` или `gen=GenOptions(...)`. **Не** патчить `orchestra.py`.
 - `force_model` = **id записи пула** (`ollama:…` / `openrouter:…`), не сырой tag.
-- Стрим: `on_token` / `on_status`; на `retry`/`restore` сбрасывай показанный текст.
+- Стрим: `on_token` / `on_status`; на `retry`/`restore` сбрасывай показанный текст (`restore` + `reason=math-patch` — патч числа без эскалации). В payload есть `elapsed_ms`.
 - Ключ OR: `OPENROUTER_API_KEY` или `client.set_openrouter_api_key`; не в git.
 - Не дублируй роутинг/selfcheck; не импортируй внутренности пакета без нужды.
 - Selfcheck по умолчанию бракует короткие «не могу»/«не знаю». В боте часто:

@@ -117,7 +117,7 @@ print(result.text, result.tier, result.model, result.gen)
 Примеры: `examples/ask_sdk.py`, `examples/ask_sdk_bot.py` (Ollama + OpenRouter).  
 `settings.json`: в корне репо при разработке; иначе `%LOCALAPPDATA%/qwen-orchestra/` (Windows) или `~/.config/qwen-orchestra/`.
 Блок `selfcheck` (опц.): `flag_refusal` / `flag_uncertain` / `flag_irrelevant` и списки фраз — браковать ли короткие отказы («не могу»), неуверенность («не знаю») и LLM-вердикт «не по теме». По умолчанию все включены; UI — «Модели и промпты».
-Блок `plan`: тумблер декомпозиции, `max_steps` (2–6), селект **модели планировщика**. Составленный план в чате нужно **утвердить** кнопкой, иначе оркестр ответит одним воркером. Классификатор «нужен ли план» — модель роутера; один вопрос план не строит, два независимых («курс доллара и описание одуванчика») — строит. Пункты стримятся в сворачиваемые окна над итоговым ответом.
+Блок `plan`: тумблер декомпозиции, `max_steps` (2–6), селект **модели планировщика**. Составленный план в чате нужно **утвердить** кнопкой, иначе оркестр ответит одним воркером. Классификатор «нужен ли план» — модель роутера; один вопрос план не строит, два независимых («курс доллара и описание одуванчика») — строит. Голое «посчитай 15% от 2400» считает CPU сразу, без плана. Пункты стримятся в сворачиваемые окна над итоговым ответом.
 
 ---
 
@@ -149,10 +149,10 @@ print(result.text, result.tier, result.model, result.gen)
 
 | Путь | Назначение |
 |------|------------|
-| `qwen_orchestra/` | SDK: Client, orchestra, plan, router, selfcheck, llm, settings, metrics |
+| `qwen_orchestra/` | SDK: `Client` + фасады `orchestra` / `plan` / `router` / `settings` / `selfcheck` |
 | `orchestra.py` и др. | Shim-модули для старых импортов |
-| `server.py` | FastAPI + SSE + `/api/metrics`, порт `8787` |
-| `web/` | UI (чат + монитор) |
+| `server.py` | FastAPI + health/settings/чаты; SSE — `server_sse.py`, порт `8787` |
+| `web/` | UI: `js/` + `css/` (чат + монитор) |
 | `open_web.py` | Лаунчер |
 | `examples/ask_sdk.py` | Пример SDK |
 | `AGENTS.md` | Документация для AI-агентов |

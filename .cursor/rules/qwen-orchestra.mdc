@@ -11,7 +11,7 @@ alwaysApply: true
 
 - SDK: `qwen_orchestra.Client` → `orchestra.handle` ← `router` + `plan` + `selfcheck` + `llm` + `tools_web` + `tools_local` + `settings`
 - Цикл: `route → need_plan? → (planner → шаги → compose) | worker → selfcheck → retry` (до `MAX_ATTEMPTS`)
-- Веб: `server.py` (FastAPI, `127.0.0.1:8787`) + `web/` (чат + правая панель монитора)
+- Веб: `server.py` + `server_sse.py` (FastAPI, `127.0.0.1:8787`) + `web/js/` + `web/css/` (чат + монитор)
 - Метрики: `qwen_orchestra.metrics` → `GET /api/metrics` (psutil, nvidia-smi + температуры, Ollama `/api/ps`)
 - UI Markdown/код/формулы: vendored `web/vendor/` — marked, DOMPurify, highlight.js, KaTeX (без npm/CDN)
 - Лаунчер: `open_web.py` / `QwenChat.exe` (при необходимости `ollama serve`, ждёт `/api/ready`, открывает браузер; свою Ollama гасит при выходе)
@@ -27,7 +27,7 @@ alwaysApply: true
 Эскалация после selfcheck — следующая available-модель с большим rank.
 Health ok при ≥1 доступной модели пула.
 Floor (код): tiny только приветствия/арифметика; иначе mid+; coder — отладка и крупный код; при отсутствии тира — `_fit_tier` к ближайшему доступному.
-Тексты для LLM-роутера — editable per-model `router_prompt` (не путать с `tier_floor`).
+Тексты для LLM-роутера — editable per-model `router_prompt` (не путать с `tier_floor`). JSON `tier.enum` собирается из тиров пула (`build_route_schema`).
 Для Qwen3.5 в `llm.py` всегда `think: false` (роутер/tools/стрим/планировщик без thinking).
 
 ## Контекст
@@ -36,19 +36,19 @@ Floor (код): tiny только приветствия/арифметика; �
 Затем per-model: `num_ctx = ceil_256(base * (1 + ctx_overhead_pct/100))` ∈ [256…`max_ctx`|8192].
 Поля пула: `ctx_overhead_pct` (0…900; 300 → ×4), `max_ctx` (опц.).
 Defaults по тиру: tiny/nano/small/mid = 300/200/100/50 (+ max 4096 у мелких); large+ = 0.
-Приоритет: не обрезать запрос; затем минимум VRAM. История для сложных тиров — только по отсылкам. Логика — `plan_worker_context` в `orchestra.py`.
+Приоритет: не обрезать запрос; затем минимум VRAM. История для сложных тиров — только по отсылкам. Логика — `plan_worker_context` (`orch_ctx.py`, фасад `orchestra.py`).
 Web-tools: кэш между retry, dedupe, лимит вызовов; `fetch_url` читает ограниченный объём байт.
-Local time: tiny `need_local_time` (без regex; любое упоминание времени/даты → true) → снимок часов ПК в system (`tools_local`).
-Calc: `need_calc` → план с неделимым блоком «Формула» + «Счёт ПК» (`calculate` на CPU). Минус только с пробелами. Без tools — предрасчёт или `CALCULATE:`.
+Local time: tiny `need_local_time` (без regex; любое упоминание времени/даты → true) **или** автоматически при `need_web` → снимок часов ПК в system (`tools_local`).
+Calc: `need_calc` → если `pick_formula` видит выражение, CPU сразу (`direct_calc_text`); иначе план «Формула» + «Счёт ПК» (`calculate` на CPU). Минус только с пробелами. Без tools — предрасчёт или `CALCULATE:`.
 
 ## При изменениях
 
-- Жёсткий floor/ceiling — в `router.tier_floor` / `tier_ceiling` (+ shortcuts в `route`)
+- Жёсткий floor/ceiling — в `router.tier_floor` / `tier_ceiling` (код в `router_detect.py`; shortcuts в `route`)
 - Тексты «когда какую модель» для LLM-роутера — `settings.py` / UI (не дублировать в коде)
-- Размер окна / история — только в `plan_worker_context` (+ хелперы рядом)
-- Новые проверки ответа — только в `selfcheck.py` (код проблемы + `HINTS`); `refusal`/`uncertain` включаются/паттерны — `settings.selfcheck` (не хардкодить в оркестре)
-- Прямой счёт — `calc.py` (`need_calc`, tool `calculate`); не eval произвольного кода
-- Декомпозиция запроса — `plan.py` + `handle(allow_plan=…, on_plan_confirm=…)`; модель планировщика — `planner_model` в settings/UI; один вопрос / 1 шаг — не план; два независимых атомарных вопроса в одном сообщении — план; **расчёт** — всегда блок Формула+Счёт ПК; в вебе план и шаги — сворачиваемые окна (стрим пункта, склейка в теле); `on_token` — только склейка
+- Размер окна / история — только в `plan_worker_context` (`orch_ctx.py`)
+- Новые проверки ответа — только в `selfcheck.py` (код проблемы + `HINTS` в `selfcheck_hints.py`); `refusal`/`uncertain` включаются/паттерны — `settings.selfcheck` (не хардкодить в оркестре)
+- Прямой счёт — `calc.py` (`need_calc`, `direct_calc_text`, tool `calculate`); не eval произвольного кода
+- Декомпозиция запроса — `plan.py` + `handle(allow_plan=…, on_plan_confirm=…)`; модель планировщика — `planner_model` в settings/UI; один вопрос / 1 шаг — не план; два независимых атомарных вопроса в одном сообщении — план; **расчёт** — CPU сразу если формула в тексте, иначе блок Формула+Счёт ПК; шаги плана — `force_need_*` без повторной классификации, короткий хвост истории; в вебе план и шаги — сворачиваемые окна (стрим пункта, склейка в теле); `on_token` — только склейка
 - Не дублировать оркестр в сервере; стрим через `on_token`/`on_status` + SSE
 - Публичный API для приложений — `qwen_orchestra.Client` (не плодить обходные импорты ядра без нужды)
 - По умолчанию `127.0.0.1`; `0.0.0.0` только через `--share` (опц. `--token`); не делать share дефолтом; не добавлять light-theme / полноценный multi-user / code-editor без запроса
