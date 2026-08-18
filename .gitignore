@@ -22,6 +22,9 @@ QwenChat.exe
 Thumbs.db
 Desktop.ini
 
+# Local README snapshot before rewrites
+README.md.bak
+
 # User orchestra settings (models + router prompts)
 settings.json
 secrets.json
