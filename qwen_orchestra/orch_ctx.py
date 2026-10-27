@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from .orchestra import (
     CTX_ALIGN,
+    CTX_DATE_LINE_TOKENS,
     CTX_OUT_CODE,
     CTX_OUT_NORMAL,
     CTX_OUT_SHORT,
     CTX_SAFETY_FLAT,
+    CTX_STEPS,
     CTX_TEMPLATE_TOKENS,
+    CTX_TOOL_RESULTS_CALC,
+    CTX_TOOL_RESULTS_WEB,
     HISTORY_FULL,
     HISTORY_LIGHT,
     NUM_CTX_MAX,
     NUM_CTX_MIN,
+    RETRY_COMPLETE_SYSTEM,
+    RETRY_SYSTEM,
     WORKER_SYSTEM,
     ContextPlan,
     _COMPLEX_TIERS,
@@ -98,6 +105,35 @@ def _prompt_tokens(
     return total
 
 
+def extra_prompt_tokens(
+    *,
+    tools: list | None = None,
+    local_context: str | None = None,
+    retry_hint: str | None = None,
+    prev_answer: str | None = None,
+    need_web: bool = False,
+    need_calc: bool = False,
+) -> int:
+    """Токены, которых нет в system/истории/user: схемы tools, local_context,
+    retry-правка и резерв под результаты tools."""
+    total = 0
+    if tools:
+        total += _estimate_tokens(json.dumps(tools, ensure_ascii=False))
+        if need_web:
+            total += CTX_TOOL_RESULTS_WEB
+        if need_calc:
+            total += CTX_TOOL_RESULTS_CALC
+    # без полного local_context в system уходит короткая строка с датой
+    total += (_estimate_tokens(local_context) if local_context else CTX_DATE_LINE_TOKENS) + 2
+    if retry_hint and prev_answer:
+        total += _estimate_tokens(
+            RETRY_COMPLETE_SYSTEM.format(hint=retry_hint, prev=prev_answer)
+        ) + 2
+    elif retry_hint:
+        total += _estimate_tokens(RETRY_SYSTEM.format(hint=retry_hint)) + 2
+    return total
+
+
 def _output_reserve_tokens(user_text: str, tier: Tier) -> int:
     """Запас под ответ: короткий / обычный / код."""
     t = user_text or ""
@@ -114,6 +150,14 @@ def _ceil_align(n: int, step: int = CTX_ALIGN) -> int:
     return ((n + step - 1) // step) * step
 
 
+def _snap_step(n: int) -> int:
+    """Округлить окно вверх до ступени CTX_STEPS (меньше перезагрузок модели)."""
+    for step in CTX_STEPS:
+        if n <= step:
+            return step
+    return max(n, CTX_STEPS[-1])
+
+
 def _min_num_ctx(prompt_tokens: int, out_reserve: int) -> int:
     """num_ctx = ceil_256(prompt + template + reserve_ответа + safety)."""
     base = prompt_tokens + CTX_TEMPLATE_TOKENS + out_reserve
@@ -123,12 +167,12 @@ def _min_num_ctx(prompt_tokens: int, out_reserve: int) -> int:
 
 
 def _trim_history_to_fit(
-    user_text: str, history: list[dict], *, out_reserve: int
+    user_text: str, history: list[dict], *, out_reserve: int, extra_tokens: int = 0
 ) -> list[dict]:
     """Приоритет — полный текущий запрос; историю урезаем с начала, если не влезает."""
     max_prompt = NUM_CTX_MAX - CTX_TEMPLATE_TOKENS - out_reserve - CTX_SAFETY_FLAT
     max_prompt = max(64, (max_prompt * 9) // 10)
-    base = _estimate_tokens(WORKER_SYSTEM) + _estimate_tokens(user_text) + 8
+    base = _estimate_tokens(WORKER_SYSTEM) + _estimate_tokens(user_text) + 8 + extra_tokens
     if base >= max_prompt:
         return []
     kept: list[dict] = []
@@ -154,7 +198,7 @@ def _apply_ctx_scale(
     factor = 1.0 + pct / 100.0
     ceiling = NUM_CTX_MAX if not max_ctx else int(max_ctx)
     ceiling = min(NUM_CTX_MAX, max(NUM_CTX_MIN, ceiling))
-    scaled = _ceil_align(int(base_ctx * factor))
+    scaled = _snap_step(_ceil_align(int(base_ctx * factor)))
     return min(ceiling, max(NUM_CTX_MIN, scaled)), factor
 
 
@@ -166,6 +210,12 @@ def plan_worker_context(
     ctx_overhead_pct: int = 0,
     max_ctx: int | None = None,
     system_extra: str | None = None,
+    tools: list | None = None,
+    local_context: str | None = None,
+    retry_hint: str | None = None,
+    prev_answer: str | None = None,
+    need_web: bool = False,
+    need_calc: bool = False,
 ) -> ContextPlan:
     """История и num_ctx: 1) не обрезать запрос 2) минимальный ctx / VRAM (+ запас модели)."""
     hist = [
@@ -178,10 +228,23 @@ def plan_worker_context(
     extra = (system_extra or "").strip()
     if extra:
         system = f"{system}\n\n{extra}"
+    extra_tok = extra_prompt_tokens(
+        tools=tools,
+        local_context=local_context,
+        retry_hint=retry_hint,
+        prev_answer=prev_answer,
+        need_web=need_web,
+        need_calc=need_calc,
+    )
 
     if tier not in _COMPLEX_TIERS:
-        hist = _trim_history_to_fit(user_text, hist[-HISTORY_FULL:], out_reserve=out_res)
-        prompt_tok = _prompt_tokens(user_text, hist, system=system)
+        hist = _trim_history_to_fit(
+            user_text,
+            hist[-HISTORY_FULL:],
+            out_reserve=out_res,
+            extra_tokens=extra_tok,
+        )
+        prompt_tok = _prompt_tokens(user_text, hist, system=system) + extra_tok
         base = _min_num_ctx(prompt_tok, out_res)
         ctx, factor = _apply_ctx_scale(
             base, ctx_overhead_pct=ctx_overhead_pct, max_ctx=max_ctx
@@ -198,14 +261,19 @@ def plan_worker_context(
 
     use, why = needs_chat_history(user_text, hist)
     if use:
-        hist = _trim_history_to_fit(user_text, hist[-HISTORY_LIGHT:], out_reserve=out_res)
+        hist = _trim_history_to_fit(
+            user_text,
+            hist[-HISTORY_LIGHT:],
+            out_reserve=out_res,
+            extra_tokens=extra_tok,
+        )
         if not hist:
             why = f"{why}+drop-hist"
             use = False
     else:
         hist = []
 
-    prompt_tok = _prompt_tokens(user_text, hist, system=system)
+    prompt_tok = _prompt_tokens(user_text, hist, system=system) + extra_tok
     base = _min_num_ctx(prompt_tok, out_res)
     ctx, factor = _apply_ctx_scale(
         base, ctx_overhead_pct=ctx_overhead_pct, max_ctx=max_ctx

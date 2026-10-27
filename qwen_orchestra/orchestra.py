@@ -5,7 +5,8 @@
     → (retry на старшем тире)
 
 Адаптивный num_ctx (см. plan_worker_context):
-    ceil_256(tokens(промпт) + template + reserve_ответа + safety)
+    ceil_256(tokens(промпт + tools + local + retry) + template + reserve_ответа + safety),
+    затем округление до ступени CTX_STEPS (2048/4096/8192)
 
 Самопроверка (`selfcheck.check`) отбраковывает ответ, если он ушёл на другой
 язык, оказался пустым/зацикленным, стал отказом или содержит явную ошибку.
@@ -62,6 +63,13 @@ HISTORY_FULL = 8
 STEP_HISTORY_MAX = 4
 STEP_HISTORY_CHARS = 600
 CTX_TOOL_BUDGET_RATIO = 0.35
+# Ступени num_ctx: окно округляется вверх до ступени, чтобы Ollama не
+# перезагружала модель на каждый слегка иной размер.
+CTX_STEPS: tuple[int, ...] = (2048, 4096, 8192)
+# Резерв под результаты tools (web_search/fetch_url, calculate) сверх схем tools.
+CTX_DATE_LINE_TOKENS = 40  # строка «Сейчас по часам ПК…» в system воркера
+CTX_TOOL_RESULTS_WEB = 1800
+CTX_TOOL_RESULTS_CALC = 300
 
 WORKER_SYSTEM = """Ты полезный ассистент. Отвечай на языке пользователя, кратко и по делу.
 Если в контексте есть результаты поиска/страниц — опирайся на них и указывай URL.
@@ -72,6 +80,17 @@ RETRY_SYSTEM = """Предыдущая попытка ответа забрак�
 
 Ответь на вопрос заново и полностью. Не упоминай предыдущие попытки,
 не извиняйся и не благодари за замечание."""
+
+RETRY_COMPLETE_SYSTEM = """Предыдущий ответ неполный.
+Что учесть: {hint}
+
+Предыдущий ответ:
+<<<
+{prev}
+>>>
+
+Допиши недостающее и выдай итоговый ответ целиком. Не упоминай попытки,
+не извиняйся."""
 
 StatusCallback = Callable[[str, dict[str, Any]], None]
 TokenCallback = Callable[[str], None]

@@ -32,13 +32,13 @@ Floor (код): tiny только приветствия/арифметика; �
 
 ## Контекст
 
-База: `base = ceil_256(prompt + 128 + reserve_ответа + safety)`.
-Затем per-model: `num_ctx = ceil_256(base * (1 + ctx_overhead_pct/100))` ∈ [256…`max_ctx`|8192].
+База: `base = ceil_256(prompt + tools + local_context + retry + 128 + reserve_ответа + safety)`.
+Затем per-model: `num_ctx = snap_step(ceil_256(base * (1 + ctx_overhead_pct/100)))` (ступени 2048/4096/8192) ≤ `max_ctx`|8192.
 Поля пула: `ctx_overhead_pct` (0…900; 300 → ×4), `max_ctx` (опц.).
 Defaults по тиру: tiny/nano/small/mid = 300/200/100/50 (+ max 4096 у мелких); large+ = 0.
 Приоритет: не обрезать запрос; затем минимум VRAM. История для сложных тиров — только по отсылкам. Логика — `plan_worker_context` (`orch_ctx.py`, фасад `orchestra.py`).
 Web-tools: кэш между retry, dedupe, лимит вызовов; `fetch_url` читает ограниченный объём байт.
-Local time: tiny `need_local_time` (без regex; любое упоминание времени/даты → true) **или** автоматически при `need_web` → снимок часов ПК в system (`tools_local`).
+Local time: в system воркера всегда короткая строка с датой; tiny `need_local_time` (только при floor=tiny) (без regex; любое упоминание времени/даты → true) **или** автоматически при `need_web` → снимок часов ПК в system (`tools_local`).
 Calc: `need_calc` → если `pick_formula` видит выражение, CPU сразу (`direct_calc_text`); иначе план «Формула» + «Счёт ПК» (`calculate` на CPU). Минус только с пробелами. Без tools — предрасчёт или `CALCULATE:`.
 
 ## При изменениях
@@ -58,3 +58,5 @@ Calc: `need_calc` → если `pick_formula` видит выражение, CPU
 - Публичный контракт для чужих ботов/агентов — только `docs/SDK.md` + `qwen_orchestra.Client` / `GenOptions`
 - Сэмплинг воркера — через `Client.ask(temperature=…, gen=…)` (не хардкодить в orchestra); роутер/планировщик/selfcheck остаются temperature=0
 - Ответы пользователю — на русском
+
+Retry зависит от проблемы: cjk/language/repetition/truncated/incomplete — повтор на той же модели (параметры/подсказка/прошлый ответ), error/irrelevant/refusal — эскалация. Не-кодовый запрос не эскалирует на `coder`; кодовый — сначала на него.

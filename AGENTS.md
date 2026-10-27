@@ -145,7 +145,8 @@ user → route → need_plan? → (planner → шаги → compose) | worker (�
 - `need_web` — детерминированно (`need_web()` / hard+soft ключи, в т.ч. «поищи»,
   «погугли»); при `force_tier` / `force_model` LLM-роутер **не** вызывается.
   Вместе с поиском в system воркера **всегда** снимок часов ПК (`need_local_time`).
-- `need_local_time` — tiny (`need_local_time()` / JSON-классификатор), без regex,
+- Воркер **всегда** получает в system короткую строку «Сейчас по часам ПК: …» (`tools_local.local_date_line`, ~30 токенов).
+- `need_local_time` — tiny (`need_local_time()` / JSON-классификатор) **только при floor=tiny** (для mid+ отдельный вызов tiny не делается), без regex,
   **либо** автоматически при `need_web`. Критерий tiny широкий: любое упоминание
   времени/даты/«сейчас» → true. При true в system — снимок часов/даты/TZ с ПК
   (`tools_local`); чип UI «время ПК».
@@ -192,8 +193,8 @@ user → route → need_plan? → (planner → шаги → compose) | worker (�
 База (токены):
 
 ```
-base = ceil_256(tokens(промпт) + template(128) + reserve_ответа + safety)
-num_ctx = min(ceiling, max(256, ceil_256(base * (1 + ctx_overhead_pct/100))))
+base = ceil_256(tokens(промпт + tools + local_context + retry) + template(128) + reserve_ответа + safety)
+num_ctx = min(ceiling, snap_step(ceil_256(base * (1 + ctx_overhead_pct/100))))   # snap_step: 2048 / 4096 / 8192
 ```
 
 | Кусок | Значение |
@@ -203,6 +204,8 @@ num_ctx = min(ceiling, max(256, ceil_256(base * (1 + ctx_overhead_pct/100))))
 | `reserve_ответа` | 512 короткий (< 48 символов) / 768 обычный / 1536 код (`coder` или признаки кода) |
 | `safety` | `max(128, ~10% от суммы трёх кусков выше)` |
 | `ceil_256` | выравнивание как в llama.cpp |
+| `snap_step` | округление вверх до ступени `CTX_STEPS` (2048/4096/8192): меньше перезагрузок модели в Ollama |
+| tools | токены JSON-схем tools + резерв под результаты (`CTX_TOOL_RESULTS_WEB` 1800 при web, `CTX_TOOL_RESULTS_CALC` 300 при счёте), а также `local_context` и `retry_hint` |
 | `ctx_overhead_pct` | поле записи пула `0…900`; `0` = как база; `300` → база×4 |
 | `ceiling` | `max_ctx` модели или глобальный `8192` (`NUM_CTX_MAX`); clamp [256…8192] |
 
@@ -230,7 +233,7 @@ max ctx tiny/nano/small `4096`, остальные без потолка (8192).
 
 1. **Быстрые правила** (без модели):
    `cjk` (ушёл в иероглифы), `language` (не язык вопроса), `empty`, `too_short`,
-   `refusal`, `uncertain`, `repetition` (зацикливание), `truncated` (незакрытый ```).
+   `refusal`, `uncertain`, `repetition` (зацикливание), `truncated` (незакрытый ``` **или** `done_reason`/`finish_reason` = `length`). Обрыв по длине → один повтор на **той же** модели с окном на ступень шире (и `num_predict`×2, если задан), без эскалации.
    `refusal` / `uncertain` **по умолчанию включены** (короткий ответ с «не могу» /
    «не знаю» → retry). Настройка в `settings.json` → `selfcheck` или UI «Модели и промпты»:
    `flag_refusal` / `flag_uncertain` / `flag_irrelevant` (bool) и опционально свои
@@ -245,10 +248,23 @@ max ctx tiny/nano/small `4096`, остальные без потолка (8192).
 3. **LLM-ревью**, если предыдущее прошло и есть куда эскалировать:
    `irrelevant`, `error`, `incomplete`. Ревьюер — та же Ollama-модель, что воркер,
    если её тир ≥ mid (без выгрузки 9b ради 4b); иначе mid из пула.
-   `num_ctx` ревьюера — 4096. При сбое ревьюера `ok=true`, но `checked=false`
+   `num_ctx` ревьюера — окно, с которым модель уже загружена (`llm.loaded_num_ctx` → `/api/ps`), иначе 4096. При сбое ревьюера `ok=true`, но `checked=false`
    (`note=review-error`). На последней попытке (нет старшей модели) — только правила.
 
-Не прошло → запрос **переделывается** на модели уровнем выше, до `MAX_ATTEMPTS`
+Действие при провале зависит от типа проблемы (`SAME_MODEL_FIX` в `selfcheck_hints.py`):
+
+| Проблема | Действие |
+|---|---|
+| `cjk` / `language` / `repetition` | повтор на **той же** модели: подсказка, `temperature`−0.2, `repeat_penalty` ≥1.15 (1.25 для repetition) |
+| `truncated` (в т.ч. `done_reason=length`) | та же модель, окно на ступень шире, `num_predict`×2 |
+| `incomplete` | та же модель, прошлый ответ в system (`RETRY_COMPLETE_SYSTEM`: «допиши недостающее») |
+| `error` / `irrelevant` / `refusal` / `empty` / `too_short` / `uncertain` | эскалация на модель с большим rank |
+
+Повтор «на месте» — один раз на запись пула; повторная проблема → эскалация.
+Специализация при эскалации (`_next_entry_by_rank(code_task=…)`): не-кодовый запрос на `coder` не уходит;
+кодовый (`coder` как старт, код/``` в запросе, `tier_floor=coder`) эскалирует сначала на `coder`.
+
+Не прошло → запрос **переделывается** (см. таблицу; эскалация — на модель уровнем выше), до `MAX_ATTEMPTS`
 (по умолчанию 3). Правка (`Verdict.hint`) идёт в **system** (`RETRY_SYSTEM`), а не
 в текст пользователя — иначе модель извиняется вместо ответа.
 Web-tool результаты **кэшируются** между retry (повторный поиск не делается).

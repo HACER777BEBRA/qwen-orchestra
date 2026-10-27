@@ -15,7 +15,7 @@ from .calc import (
     TOOLS_CALC,
     calc_context_block,
 )
-from .llm import GenOptions, chat, chat_stream, worker_gen
+from .llm import GenOptions, chat, chat_stream, is_truncated, worker_gen
 from .orchestra import (
     CTX_OUT_NORMAL,
     CTX_TEMPLATE_TOKENS,
@@ -23,6 +23,7 @@ from .orchestra import (
     MAX_TOOL_CALLS,
     MAX_TOOL_ROUNDS,
     NUM_CTX_FULL,
+    RETRY_COMPLETE_SYSTEM,
     RETRY_SYSTEM,
     TOOL_RESULT_CHARS,
     WORKER_SYSTEM,
@@ -34,7 +35,12 @@ from .orch_ctx import _estimate_tokens
 from .orch_status import _emit
 from .router import RouteDecision, Tier
 from .selfcheck import Verdict
-from .tools_local import TOOL_IMPL_LOCAL, TOOLS_LOCAL, local_context_block
+from .tools_local import (
+    TOOL_IMPL_LOCAL,
+    TOOLS_LOCAL,
+    local_context_block,
+    local_date_line,
+)
 from .tools_web import TOOL_IMPL, TOOLS
 
 _ALL_TOOLS = list(TOOLS) + list(TOOLS_LOCAL) + list(TOOLS_CALC)
@@ -97,14 +103,18 @@ def _build_messages(
     *,
     local_context: str | None = None,
     system_extra: str | None = None,
+    prev_answer: str | None = None,
 ) -> list[dict]:
     system = WORKER_SYSTEM
     extra = (system_extra or "").strip()
     if extra:
         system = f"{system}\n\n{extra}"
-    if local_context:
-        system = f"{system}\n\n{local_context}"
-    if retry_hint:
+    system = f"{system}\n\n{local_context or local_date_line()}"
+    if retry_hint and prev_answer:
+        system = f"{system}\n\n" + RETRY_COMPLETE_SYSTEM.format(
+            hint=retry_hint, prev=prev_answer
+        )
+    elif retry_hint:
         system = f"{system}\n\n{RETRY_SYSTEM.format(hint=retry_hint)}"
     messages: list[dict] = [{"role": "system", "content": system}]
     for h in history:
@@ -162,6 +172,8 @@ def _worker_with_tools(
     gen: GenOptions | None = None,
     system_extra: str | None = None,
     tools: list | None = None,
+    meta: dict[str, Any] | None = None,
+    prev_answer: str | None = None,
 ) -> str:
     g = worker_gen(gen)
     tool_list = tools if tools is not None else _ALL_TOOLS
@@ -178,6 +190,8 @@ def _worker_with_tools(
             local_context=local_context,
             gen=g,
             system_extra=system_extra,
+            meta=meta,
+            prev_answer=prev_answer,
         )
     messages = _build_messages(
         user_text,
@@ -185,13 +199,19 @@ def _worker_with_tools(
         retry_hint,
         local_context=local_context,
         system_extra=system_extra,
+        prev_answer=prev_answer,
     )
     cache = tool_cache if tool_cache is not None else {}
     calls_done = 0
     prompt_tok = sum(_estimate_tokens(str(m.get("content") or "")) for m in messages)
+    tools_tok = _estimate_tokens(json.dumps(tool_list, ensure_ascii=False))
     remain_tok = max(
         256,
-        num_ctx - prompt_tok - CTX_TEMPLATE_TOKENS - max(256, CTX_OUT_NORMAL // 2),
+        num_ctx
+        - prompt_tok
+        - tools_tok
+        - CTX_TEMPLATE_TOKENS
+        - max(256, CTX_OUT_NORMAL // 2),
     )
     tool_budget = max(
         1200,
@@ -214,9 +234,10 @@ def _worker_with_tools(
         if not tool_calls:
             tool_calls = _fallback_tools(content)
         if not tool_calls:
+            _set_done_reason(meta, msg)
             return content or "(пустой ответ)"
 
-        messages.append(msg)
+        messages.append({k: v for k, v in msg.items() if k != "done_reason"})
         seen_round: set[str] = set()
         for call in tool_calls:
             if calls_done >= MAX_TOOL_CALLS:
@@ -261,7 +282,14 @@ def _worker_with_tools(
             tool_budget = max(400, tool_budget - len(result))
 
     msg = chat(model, messages, gen=g, num_ctx=num_ctx, provider=provider)
+    _set_done_reason(meta, msg)
     return (msg.get("content") or "").strip() or "(пустой ответ)"
+
+
+def _set_done_reason(meta: dict[str, Any] | None, msg: dict) -> None:
+    if meta is not None:
+        meta["done_reason"] = msg.get("done_reason") or ""
+        meta["truncated"] = is_truncated(meta["done_reason"])
 
 
 def _worker_plain(
@@ -277,6 +305,8 @@ def _worker_plain(
     local_context: str | None = None,
     gen: GenOptions | None = None,
     system_extra: str | None = None,
+    meta: dict[str, Any] | None = None,
+    prev_answer: str | None = None,
 ) -> str:
     g = worker_gen(gen)
     messages = _build_messages(
@@ -285,19 +315,25 @@ def _worker_plain(
         retry_hint,
         local_context=local_context,
         system_extra=system_extra,
+        prev_answer=prev_answer,
     )
 
     if stream:
-        return chat_stream(
+        info: dict[str, Any] = {}
+        text = chat_stream(
             model,
             messages,
             on_token=on_token,
             gen=g,
             num_ctx=num_ctx,
             provider=provider,
+            info=info,
         )
+        _set_done_reason(meta, info)
+        return text
 
     msg = chat(model, messages, gen=g, num_ctx=num_ctx, provider=provider)
+    _set_done_reason(meta, msg)
     return (msg.get("content") or "").strip() or "(пустой ответ)"
 
 

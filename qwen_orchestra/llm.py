@@ -26,6 +26,7 @@ DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 DEFAULT_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 DEFAULT_WORKER_TEMPERATURE = 0.3
 DEFAULT_WORKER_KEEP_ALIVE = "10m"
+_TRUNC_REASONS = frozenset({"length", "max_tokens"})
 
 _ollama_host = DEFAULT_OLLAMA_HOST
 OLLAMA_CHAT_URL = f"{DEFAULT_OLLAMA_HOST}/api/chat"
@@ -113,6 +114,11 @@ def worker_gen(gen: GenOptions | None = None) -> GenOptions:
     if g.keep_alive is None:
         g = replace(g, keep_alive=DEFAULT_WORKER_KEEP_ALIVE)
     return g
+
+
+def is_truncated(done_reason: str | None) -> bool:
+    """Ответ оборван по длине (Ollama `done_reason` / OpenRouter `finish_reason`)."""
+    return (done_reason or "").strip().lower() in _TRUNC_REASONS
 
 
 def get_ollama_host() -> str:
@@ -321,6 +327,7 @@ def _openrouter_chat(
     return {
         "role": message.get("role") or "assistant",
         "content": message.get("content") or "",
+        "done_reason": choice.get("finish_reason") or "",
     }
 
 
@@ -332,6 +339,7 @@ def _openrouter_chat_stream(
     num_ctx: int,
     gen: GenOptions,
     timeout: int,
+    info: dict[str, Any] | None = None,
 ) -> str:
     api_key, base = _openrouter_key_and_base()
     payload = _openrouter_body(
@@ -360,7 +368,10 @@ def _openrouter_chat_stream(
                 if err := chunk.get("error"):
                     msg = err if isinstance(err, str) else err.get("message") or err
                     raise RuntimeError(f"OpenRouter ({model}): {msg}")
-                delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                choice = (chunk.get("choices") or [{}])[0]
+                if info is not None and choice.get("finish_reason"):
+                    info["done_reason"] = choice["finish_reason"]
+                delta = choice.get("delta") or {}
                 piece = delta.get("content") or ""
                 if piece:
                     parts.append(piece)
@@ -402,7 +413,7 @@ def chat(
     timeout: int = 600,
     provider: str = "ollama",
 ) -> dict:
-    """Один запрос без стриминга. Возвращает объект message целиком."""
+    """Один запрос без стриминга. Возвращает message целиком (+ `done_reason`, если есть)."""
     g = _resolve_call_gen(
         temperature=temperature,
         gen=merge_gen(gen, keep_alive=keep_alive),
@@ -433,7 +444,10 @@ def chat(
         data = json.loads(resp.read().decode("utf-8"))
     if err := data.get("error"):
         raise RuntimeError(f"Ollama ({model}): {err}")
-    return data.get("message") or {}
+    message = dict(data.get("message") or {})
+    if data.get("done_reason"):
+        message["done_reason"] = data["done_reason"]
+    return message
 
 
 def chat_stream(
@@ -448,8 +462,12 @@ def chat_stream(
     think: bool | None = None,
     timeout: int = 600,
     provider: str = "ollama",
+    info: dict[str, Any] | None = None,
 ) -> str:
-    """Потоковый ответ. Токены отдаются в on_token, полный текст возвращается."""
+    """Потоковый ответ. Токены отдаются в on_token, полный текст возвращается.
+
+    `info` (опц.) — out-параметр: заполняется `done_reason`.
+    """
     g = _resolve_call_gen(
         temperature=temperature,
         gen=merge_gen(gen, keep_alive=keep_alive),
@@ -464,6 +482,7 @@ def chat_stream(
             num_ctx=num_ctx,
             gen=g,
             timeout=timeout,
+            info=info,
         )
     payload = _payload(
         model,
@@ -490,8 +509,33 @@ def chat_stream(
                 if on_token:
                     on_token(piece)
             if chunk.get("done"):
+                if info is not None and chunk.get("done_reason"):
+                    info["done_reason"] = chunk["done_reason"]
                 break
     return "".join(parts)
+
+
+def loaded_num_ctx(model: str, *, timeout: int = 3) -> int | None:
+    """num_ctx, с которым модель сейчас загружена в Ollama (`/api/ps`), иначе None.
+
+    Другой num_ctx заставляет Ollama перезагрузить модель — ревьюеру выгодно
+    взять уже загруженное окно.
+    """
+    try:
+        with urllib.request.urlopen(f"{_ollama_host}/api/ps", timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    want = (model or "").strip()
+    names = {want, want if ":" in want else f"{want}:latest"}
+    for m in data.get("models") or []:
+        if (m.get("name") in names) or (m.get("model") in names):
+            ctx = m.get("context_length")
+            try:
+                return int(ctx) if ctx else None
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def installed_models() -> list[str]:
