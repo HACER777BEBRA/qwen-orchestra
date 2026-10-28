@@ -107,7 +107,7 @@ def run_worker_attempts(
         attempt_no = attempt_base + attempt
 
         tool_list = _tools_for(decision)
-        use_tools = bool(tool_list) and provider == "ollama"
+        use_tools = bool(tool_list)
         local_ctx = _local_context_for(
             decision, user_text, precompute=not use_tools
         )
@@ -165,10 +165,17 @@ def run_worker_attempts(
                 tools=tool_list,
                 meta=worker_meta,
                 prev_answer=prev_answer,
+                plain_context=(
+                    _local_context_for(decision, user_text, precompute=True)
+                    if provider != "ollama"
+                    else None
+                ),
+                on_token=on_token if stream and not decision.need_calc else None,
             )
             if decision.need_calc:
                 text = ensure_computed(text)
-            _emit_token(on_token, text)
+            if not worker_meta.get("streamed"):
+                _emit_token(on_token, text)
         else:
             stream_now = bool(stream) and not decision.need_calc
             text = _worker_plain(

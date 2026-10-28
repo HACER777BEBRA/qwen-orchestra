@@ -128,6 +128,8 @@ class OrchestraResult:
     plan_goal: str = ""
     plan_steps: list[dict[str, Any]] = field(default_factory=list)
     elapsed_ms: int = 0
+    image_context: str = ""  # описание картинок от vision-модели
+    vision_model: str = ""
 
 
 from .orch_pool import (  # noqa: E402

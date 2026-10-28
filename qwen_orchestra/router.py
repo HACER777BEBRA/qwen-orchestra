@@ -106,6 +106,8 @@ class RouteDecision:
     reply: str = ""
     need_local_time: bool = False
     need_calc: bool = False
+    # время решает сама модель воркера (tool get_local_time), без вызова tiny
+    time_by_model: bool = False
 
 
 from .router_detect import (  # noqa: E402

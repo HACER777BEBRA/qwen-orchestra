@@ -1,4 +1,5 @@
-import { autosize, els, setBusy, state } from "./core.js";
+import { autosize, canSend, els, setBusy, state } from "./core.js";
+import { initAttachments } from "./attach.js";
 import { copyCodeBlock } from "./markdown.js";
 import { applyAddFormCtxDefaults, defaultRankFor } from "./models-list.js";
 import { syncAddProviderUi } from "./models-select.js";
@@ -26,7 +27,7 @@ import { initMonitorPanel } from "./monitor-panel.js";
 
 els.input.addEventListener("input", () => {
   autosize();
-  els.btnSend.disabled = state.busy || !els.input.value.trim();
+  els.btnSend.disabled = state.busy || !canSend();
 });
 
 els.input.addEventListener("keydown", (e) => {
@@ -37,6 +38,7 @@ els.input.addEventListener("keydown", (e) => {
 });
 
 els.btnSend.addEventListener("click", send);
+initAttachments();
 els.btnNew.addEventListener("click", newChat);
 els.btnModels.addEventListener("click", openModelsModal);
 els.btnModelsClose.addEventListener("click", closeModelsModal);

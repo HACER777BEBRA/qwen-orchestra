@@ -115,6 +115,8 @@ export function metaChips(meta) {
   if (!meta) return "";
   const chips = [];
   if (meta.tier) chips.push(`<span class="chip accent">${escapeHtml(meta.tier)}</span>`);
+  if (meta.vision_model)
+    chips.push(`<span class="chip" title="Картинка расшифрована">👁 ${escapeHtml(meta.vision_model)}</span>`);
   if (meta.model) chips.push(`<span class="chip">${escapeHtml(meta.model)}</span>`);
   if (meta.need_web) chips.push(`<span class="chip">web</span>`);
   if (meta.need_local_time) chips.push(`<span class="chip">время ПК</span>`);
@@ -152,6 +154,24 @@ export function appendMessage(role, content, meta, { streaming = false } = {}) {
     <div class="msg-meta-slot"></div>
   `;
   hydratePlanStack(wrap.querySelector(".msg-plan-stack"), meta);
+  const imgs = role === "user" && meta && Array.isArray(meta.images) ? meta.images : [];
+  if (imgs.length) {
+    const row = document.createElement("div");
+    row.className = "msg-images";
+    row.innerHTML = imgs
+      .map((im) => {
+        const src = typeof im === "string" ? im : im.thumb;
+        const tip =
+          im && im.recompressed
+            ? `${im.width}x${im.height}, сжато ${Math.round(im.original_bytes / 1024)} -> ${Math.round(im.bytes / 1024)} КБ`
+            : im && im.width
+              ? `${im.width}x${im.height}`
+              : "";
+        return `<img src="${escapeHtml(src)}" alt="вложение" title="${escapeHtml(tip)}" />`;
+      })
+      .join("");
+    wrap.querySelector(".msg-body").before(row);
+  }
   if (content) setMsgBody(wrap.querySelector(":scope > .msg-body"), content);
   wrap.querySelector(".msg-meta-slot").innerHTML = metaChips(meta);
   els.messages.appendChild(wrap);

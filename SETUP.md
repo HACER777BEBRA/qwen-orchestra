@@ -23,11 +23,12 @@ python -m pip install -e ".[web]"
 # только ядро без веб-сервера: python -m pip install -e .
 ```
 
-Пакет `qwen-orchestra`: ядро — `ddgs`, `psutil`; extra `[web]` — `fastapi`, `uvicorn`, `pydantic`.
+Пакет `qwen-orchestra`: ядро — `ddgs`, `psutil`, `Pillow` (картинки); extra `[web]` — `fastapi`, `uvicorn`, `pydantic`.
 
 ### Модели Ollama
 
 ```powershell
+ollama pull gemma3:4b   # опционально: распознавание картинок
 ollama pull qwen3.5:0.8b
 ollama pull qwen3.5:4b
 ollama pull qwen3.5:9b

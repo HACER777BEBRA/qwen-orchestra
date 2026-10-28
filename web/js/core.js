@@ -7,6 +7,10 @@ export const els = {
   messages: $("#messages"),
   input: $("#input"),
   btnSend: $("#btn-send"),
+  btnAttach: $("#btn-attach"),
+  fileInput: $("#file-input"),
+  attachStrip: $("#attach-strip"),
+  composer: $("#composer"),
   btnNew: $("#btn-new"),
   tierSelect: $("#tier-select"),
   health: $("#health"),
@@ -72,6 +76,7 @@ export const state = {
   chats: [],
   activeId: null,
   busy: false,
+  attachments: [], // {name, dataUrl}
   selectGen: 0,
   ollamaModels: [],
   slots: [], // пул моделей (compat имя)
@@ -117,10 +122,16 @@ export function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+/** Можно отправлять: есть текст или прикреплённая картинка. */
+export function canSend() {
+  return !!els.input.value.trim() || state.attachments.length > 0;
+}
+
 export function setBusy(busy) {
   state.busy = busy;
-  els.btnSend.disabled = busy || !els.input.value.trim();
+  els.btnSend.disabled = busy || !canSend();
   els.input.disabled = busy;
+  if (els.btnAttach) els.btnAttach.disabled = busy;
   els.btnNew.disabled = busy;
   els.tierSelect.disabled = busy;
   if (els.btnModels) els.btnModels.disabled = busy;

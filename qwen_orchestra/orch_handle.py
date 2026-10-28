@@ -29,6 +29,12 @@ from .orch_pool import (
     available_pool_entries,
 )
 from .orch_status import _cli_status_printer, _emit, _emit_token, _with_elapsed
+from .orch_vision import (
+    DEFAULT_IMAGE_PROMPT,
+    describe_images,
+    image_system_extra,
+    pick_vision_entry,
+)
 from .orch_worker import _Attempt
 from .router import ALL_TIERS, RouteDecision, Tier, route
 
@@ -61,7 +67,10 @@ def handle(
     force_need_web: bool | None = None,
     force_need_local_time: bool | None = None,
     installed: set[str] | None = None,
+    images: list[str] | None = None,
 ) -> OrchestraResult:
+    """`images` — base64 (см. `vision.prepare_image`): vision-модель сначала переводит их в текст,
+    описание уходит в system основного воркера; план при картинках не строится."""
     history = history or []
     app_settings.ensure_bootstrapped()
     effective_gen = worker_gen(
@@ -92,8 +101,16 @@ def handle(
         on_status = _cli_status_printer(verbose)
     on_status, elapsed_of = _with_elapsed(on_status)
 
+    image_context = ""
+    vision_model = ""
+
     def _stamp(result: OrchestraResult) -> OrchestraResult:
-        return replace(result, elapsed_ms=elapsed_of())
+        return replace(
+            result,
+            elapsed_ms=elapsed_of(),
+            image_context=image_context,
+            vision_model=vision_model,
+        )
 
     with app_settings.runtime_lock:
         pool = [dict(e) for e in orch.POOL]
@@ -114,6 +131,21 @@ def handle(
     installed = have
 
     available_all = available_pool_entries(installed, pool=pool, routed_only=False)
+    if images:
+        if not available_all and not ollama_ok and ollama_exc is not None:
+            raise RuntimeError(f"Ollama недоступна: {ollama_exc}") from ollama_exc
+        v_entry = pick_vision_entry(
+            pool=pool, available_all=available_all, installed=installed
+        )
+        vision_model = (v_entry.get("model") or "").strip()
+        image_context = describe_images(
+            user_text, images, entry=v_entry, on_status=on_status
+        )
+        extra = image_system_extra(image_context, vision_model)
+        system_extra = f"{system_extra}\n\n{extra}" if system_extra else extra
+        user_text = (user_text or "").strip() or DEFAULT_IMAGE_PROMPT
+        allow_plan = False
+
     available_routed = available_pool_entries(installed, pool=pool, routed_only=True)
     available = {str(e["tier"]) for e in available_routed if e.get("tier")}
     if not available_all:
@@ -247,7 +279,7 @@ def handle(
     retry_hint: str | None = None
     lock_forced = bool(force_model)
 
-    if decision.tier == "tiny" and decision.reply and not force_model:
+    if decision.tier == "tiny" and decision.reply and not force_model and not images:
         tiny_entry = _resolve_entry("tiny")
         tiny_name = (tiny_entry.get("model") or "").strip()
         verdict = selfcheck.check(

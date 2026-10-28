@@ -18,7 +18,7 @@ from .orchestra import (
 )
 from .orch_pool import _fit_tier, _rank
 from .orch_status import _emit, _emit_token, _status_scoped, _step_token_cb
-from .router import ALL_TIERS, RouteDecision, Tier, need_local_time, need_web
+from .router import ALL_TIERS, RouteDecision, Tier, need_web
 
 
 def _step_tier(
@@ -80,12 +80,14 @@ def _forced_decision(
     """Роут без LLM-классификаторов, если флаги уже известны (шаг плана)."""
     web = bool(force_need_web) if force_need_web is not None else need_web(user_text)
     calc = bool(force_need_calc) if force_need_calc is not None else need_calc(user_text)
+    by_model = False
     if force_need_local_time is not None:
         local = bool(force_need_local_time) or web
     elif web:
         local = True
     else:
-        local = need_local_time(user_text)
+        local = False
+        by_model = True
     return RouteDecision(
         True,
         tier,
@@ -94,6 +96,7 @@ def _forced_decision(
         "",
         need_local_time=local,
         need_calc=calc,
+        time_by_model=by_model,
     )
 
 

@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 
 from qwen_orchestra.orchestra import handle
 from qwen_orchestra.plan import PLAN_CONFIRM_TIMEOUT
+from qwen_orchestra.vision import ImageError, prepare_images
 
 from server import (
     MAX_MESSAGE_CHARS,
@@ -29,6 +30,14 @@ from server import (
     _worker_lock,
     app,
 )
+
+def _history_content(m: ChatMessage) -> str:
+    """Текст реплики для модели; у сообщений с картинками — описание от vision-модели."""
+    desc = (m.meta or {}).get("vision_text") if m.role == "user" else None
+    if not desc:
+        return m.content
+    return f"{m.content}\n\n[К сообщению приложено изображение. Описание: {desc}]"
+
 
 def _sse(event: str, data: dict[str, Any] | str) -> str:
     payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
@@ -51,10 +60,19 @@ def _q_put(q: Queue, item: tuple[str, Any] | None) -> None:
 @app.post("/api/chats/{chat_id}/messages")
 def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
     content = (body.content or "").strip()
-    if not content:
+    if not content and not body.images:
         raise HTTPException(400, "Empty message")
     if len(content) > MAX_MESSAGE_CHARS:
         raise HTTPException(400, f"Сообщение слишком длинное (>{MAX_MESSAGE_CHARS})")
+    try:
+        prepared = prepare_images(
+            [i.data for i in body.images], names=[i.name for i in body.images]
+        )
+    except ImageError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    images_b64 = [p.b64 for p in prepared]
+    user_meta = {"images": [p.info() for p in prepared]} if prepared else None
+    shown = content or ("[изображение]" if prepared else "")
 
     wlock = _worker_lock(chat_id)
     if not wlock.acquire(blocking=False):
@@ -67,13 +85,14 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                 wlock.release()
                 raise HTTPException(404, "Chat not found")
             history = [
-                {"role": m.role, "content": m.content}
+                {"role": m.role, "content": _history_content(m)}
                 for m in chat.messages
                 if m.role in {"user", "assistant"}
             ]
             if chat.title == "New Chat":
-                chat.title = _title_from(content)
-            chat.messages.append(ChatMessage(role="user", content=content))
+                chat.title = _title_from(shown)
+            user_msg = ChatMessage(role="user", content=shown, meta=user_meta)
+            chat.messages.append(user_msg)
             chat.updated_at = _now()
             generation = chat.generation
             wait = _PlanWait(generation)
@@ -129,6 +148,18 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "ok": payload.get("ok"),
                         "scope": payload.get("scope") or "",
                         "id": payload.get("id") if payload.get("id") is not None else payload.get("step_id"),
+                    },
+                ),
+            )
+        elif event == "vision":
+            _q_put_sse(
+                q,
+                (
+                    "meta",
+                    {
+                        "phase": "vision",
+                        "vision_model": payload.get("model"),
+                        "images": payload.get("images"),
                     },
                 ),
             )
@@ -343,6 +374,7 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                 history,
                 force_tier=body.force_tier,
                 force_model=body.force_model,
+                images=images_b64 or None,
                 stream=True,
                 verbose=False,
                 on_token=on_token,
@@ -353,6 +385,8 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
             with _lock:
                 c = _chats.get(chat_id)
                 if c is not None and c.generation == generation:
+                    if result.image_context:
+                        user_msg.meta = {**(user_msg.meta or {}), "vision_text": result.image_context}
                     c.messages.append(
                         ChatMessage(
                             role="assistant",

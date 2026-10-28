@@ -1,6 +1,7 @@
 # Core SDK (также: pip install -e .)
 ddgs>=9.0.0,<10
 psutil>=6.0.0,<8
+Pillow>=10.0.0,<13
 
 # Web app (также: pip install -e ".[web]")
 fastapi>=0.115.0,<1

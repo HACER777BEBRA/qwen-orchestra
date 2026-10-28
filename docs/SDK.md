@@ -36,6 +36,7 @@ if not h["ok"]:
 
 result = client.ask("привет", temperature=0.2)
 # или: client.ask("…", gen=GenOptions(temperature=0.2, seed=42, num_predict=512))
+# картинки (путь / bytes / base64): client.ask("что на фото?", images=[Path("a.jpg")])
 print(result.text)
 print(result.model, result.tier, result.gen)
 ```

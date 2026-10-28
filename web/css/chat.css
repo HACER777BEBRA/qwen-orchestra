@@ -361,3 +361,18 @@
   gap: 6px;
   margin: 2px 0 4px;
 }
+
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 6px;
+}
+
+.msg-images img {
+  max-width: 160px;
+  max-height: 160px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  object-fit: cover;
+}

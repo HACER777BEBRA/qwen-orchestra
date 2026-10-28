@@ -12,6 +12,7 @@ authors = [{ name = "Qwen Orchestra" }]
 dependencies = [
     "ddgs>=9.0.0,<10",
     "psutil>=6.0.0,<8",
+    "Pillow>=10.0.0,<13",
 ]
 
 [project.optional-dependencies]

@@ -110,8 +110,14 @@ class CreateChatBody(BaseModel):
     title: str | None = None
 
 
+class ImageIn(BaseModel):
+    name: str = ""
+    data: str  # base64 или data:-URL
+
+
 class SendMessageBody(BaseModel):
-    content: str
+    content: str = ""
+    images: list[ImageIn] = Field(default_factory=list)
     force_tier: str | None = None
     force_model: str | None = None
 
@@ -205,6 +211,7 @@ def _result_meta(result: Any) -> dict[str, Any]:
         "plan_goal": getattr(result, "plan_goal", "") or "",
         "plan_steps": getattr(result, "plan_steps", None) or [],
         "elapsed_ms": int(getattr(result, "elapsed_ms", 0) or 0),
+        "vision_model": getattr(result, "vision_model", "") or "",
     }
 
 

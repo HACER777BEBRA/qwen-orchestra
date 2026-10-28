@@ -12,6 +12,7 @@ alwaysApply: true
 - SDK: `qwen_orchestra.Client` → `orchestra.handle` ← `router` + `plan` + `selfcheck` + `llm` + `tools_web` + `tools_local` + `settings`
 - Цикл: `route → need_plan? → (planner → шаги → compose) | worker → selfcheck → retry` (до `MAX_ATTEMPTS`)
 - Веб: `server.py` + `server_sse.py` (FastAPI, `127.0.0.1:8787`) + `web/js/` + `web/css/` (чат + монитор)
+- Картинки: `vision.py` (сжатие) + `orch_vision.py` (vision-модель расшифровывает → `system_extra` основного воркера); `handle(images=…)`
 - Метрики: `qwen_orchestra.metrics` → `GET /api/metrics` (psutil, nvidia-smi + температуры, Ollama `/api/ps`)
 - UI Markdown/код/формулы: vendored `web/vendor/` — marked, DOMPurify, highlight.js, KaTeX (без npm/CDN)
 - Лаунчер: `open_web.py` / `QwenChat.exe` (при необходимости `ollama serve`, ждёт `/api/ready`, открывает браузер; свою Ollama гасит при выходе)

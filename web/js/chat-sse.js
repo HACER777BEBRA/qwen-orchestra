@@ -1,4 +1,5 @@
 import { autosize, els, forceSelection, setBusy, state } from "./core.js";
+import { clearAttachments } from "./attach.js";
 import {
   appendMessage,
   ensureChat,
@@ -14,6 +15,7 @@ import {
   finishStepFold,
   flushBodyRender,
   flushStepRender,
+  planHeadLabel,
   renderPlanCard,
   scheduleBodyRender,
   scheduleStepRender,
@@ -30,6 +32,12 @@ export function applySseEvent(event, data, ctx) {
     if ((data.phase === "retry" || data.phase === "restore") && !stepScope) {
       ctx.full = "";
       flushBodyRender(ctx, { streaming: true });
+    }
+    if (data.phase === "vision") {
+      ctx.liveMeta = { ...ctx.liveMeta, vision_model: data.vision_model };
+      metaSlot.innerHTML = metaChips(ctx.liveMeta);
+      els.statusLine.textContent = `Читаю картинку · ${data.vision_model || "vision"}…`;
+      return;
     }
     if (data.phase === "retry" && data.problems && data.problems.length && !stepScope) {
       appendChainLine(toolsEl, `повтор (${data.problems.join(", ")}) → ${data.model || ""}`);
@@ -216,6 +224,7 @@ export function applySseEvent(event, data, ctx) {
       plan_goal: data.plan_goal || ctx.liveMeta.plan_goal || "",
       plan_steps: data.plan_steps || [],
       elapsed_ms: data.elapsed_ms,
+      vision_model: data.vision_model || ctx.liveMeta.vision_model,
     };
     if (data.text) {
       ctx.full = data.text;
@@ -253,10 +262,11 @@ export function applySseEvent(event, data, ctx) {
 
 export async function send() {
   const text = els.input.value.trim();
-  if (!text || state.busy) return;
+  const attached = state.attachments.slice();
+  if ((!text && !attached.length) || state.busy) return;
 
   setBusy(true);
-  els.statusLine.textContent = "Роутинг…";
+  els.statusLine.textContent = attached.length ? "Картинка…" : "Роутинг…";
 
   let chatId;
   let asst = null;
@@ -277,7 +287,12 @@ export async function send() {
     chatId = await ensureChat();
     els.input.value = "";
     autosize();
-    appendMessage("user", text);
+    clearAttachments();
+    appendMessage(
+      "user",
+      text || "[изображение]",
+      attached.length ? { images: attached.map((a) => a.dataUrl) } : null
+    );
 
     asst = appendMessage("assistant", "", null, { streaming: true });
     ctx.bodyEl = asst.querySelector(":scope > .msg-body");
@@ -289,7 +304,11 @@ export async function send() {
     const res = await fetch(`/api/chats/${chatId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: text, ...forceSelection() }),
+      body: JSON.stringify({
+        content: text,
+        images: attached.map((a) => ({ name: a.name, data: a.dataUrl })),
+        ...forceSelection(),
+      }),
     });
     if (!res.ok) {
       const err = await res.text();
