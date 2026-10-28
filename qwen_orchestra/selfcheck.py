@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 
 from .calc import CALC_VERB_RE, extract_evals, format_number, try_eval
-from .llm import chat
+from .llm import chat, loaded_num_ctx
 from .selfcheck_hints import HINTS, SEVERITY
 
 # Скрипты письма: CJK (яп/кит/кор), кириллица, латиница
@@ -384,6 +384,14 @@ def content_problems(
     return problems
 
 
+def _review_num_ctx(model: str) -> int:
+    need = 3072  # ВОПРОС ≤2000 + ОТВЕТ ≤4000 симв. + system + JSON-ответ
+    loaded = loaded_num_ctx(model)
+    if loaded and loaded >= need:
+        return loaded
+    return 4096
+
+
 def llm_review(
     user_text: str,
     answer: str,
@@ -394,8 +402,9 @@ def llm_review(
     flag_irrelevant: bool | None = None,
 ) -> Verdict:
     """Ревью ответа отдельной моделью: ловит ошибки и уход от вопроса."""
-    # Промпт ≤ ~3k токенов оценки — 4096 с запасом, без удержания полного 8k
-    review_ctx = 4096
+    # Промпт ≤ ~3k токенов оценки. Если модель уже загружена (воркер) — берём её
+    # окно: другой num_ctx заставил бы Ollama перезагрузить модель.
+    review_ctx = _review_num_ctx(model)
     allow_refusal = _RULES.flag_refusal if flag_refusal is None else bool(flag_refusal)
     allow_irrelevant = (
         _RULES.flag_irrelevant if flag_irrelevant is None else bool(flag_irrelevant)

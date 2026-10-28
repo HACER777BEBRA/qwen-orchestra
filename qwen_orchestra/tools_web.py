@@ -11,6 +11,16 @@ from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 
+_SKIP_TAGS = {"script", "style", "noscript", "svg", "nav", "header", "footer", "aside", "form"}
+_BLOCK_TAGS = {
+    "p", "div", "br", "li", "ul", "ol", "tr", "table", "section", "article", "main",
+    "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre",
+}
+_META_CHARSET_RE = re.compile(rb"<meta[^>]+charset=[\"']?\s*([\w-]+)", re.IGNORECASE)
+_MAIN_RE = re.compile(r"<(main|article)\b.*?</\1>", re.IGNORECASE | re.DOTALL)
+_MIN_MAIN_CHARS = 300
+
+
 class _TextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -18,22 +28,56 @@ class _TextExtractor(HTMLParser):
         self._skip = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
-        if tag in {"script", "style", "noscript", "svg"}:
+        if tag in _SKIP_TAGS:
             self._skip += 1
+        elif tag in _BLOCK_TAGS and not self._skip:
+            self._chunks.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style", "noscript", "svg"} and self._skip:
+        if tag in _SKIP_TAGS and self._skip:
             self._skip -= 1
+        elif tag in _BLOCK_TAGS and not self._skip:
+            self._chunks.append("\n")
 
     def handle_data(self, data: str) -> None:
         if self._skip:
             return
         text = data.strip()
         if text:
-            self._chunks.append(text)
+            self._chunks.append(text + " ")
 
     def text(self) -> str:
-        return "\n".join(self._chunks)
+        raw = "".join(self._chunks)
+        lines = (" ".join(line.split()) for line in raw.split("\n"))
+        return "\n".join(line for line in lines if line)
+
+
+def _extract_text(html: str) -> str:
+    """Текст страницы; если есть <main>/<article> достаточного размера — берём его."""
+    candidates = [html]
+    main_blocks = [m.group(0) for m in _MAIN_RE.finditer(html)]
+    if main_blocks:
+        candidates.insert(0, max(main_blocks, key=len))
+    for chunk in candidates:
+        parser = _TextExtractor()
+        try:
+            parser.feed(chunk)
+        except Exception:  # noqa: BLE001
+            text = re.sub(r"<[^>]+>", " ", chunk)
+        else:
+            text = parser.text()
+        if len(text) >= _MIN_MAIN_CHARS or chunk is candidates[-1]:
+            return text
+    return ""
+
+
+def _detect_charset(header_charset: str | None, raw: bytes) -> str:
+    if header_charset:
+        return header_charset
+    m = _META_CHARSET_RE.search(raw[:4096])
+    if m:
+        return m.group(1).decode("ascii", errors="ignore") or "utf-8"
+    return "utf-8"
 
 
 _BLOCKED_HOSTS = {
@@ -106,31 +150,91 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def web_search(query: str, max_results: int = 5) -> str:
-    """Поиск в интернете через DuckDuckGo."""
+SEARCH_TIMEOUT = 10
+_TIMELIMITS = {"d", "w", "m", "y"}
+_CYRILLIC_RE = re.compile(r"[а-яё]", re.IGNORECASE)
+_NEWS_RE = re.compile(r"новост|news|заголовк|headline|происшеств", re.IGNORECASE)
+_REGION_RE = re.compile(r"^[a-z]{2}-[a-z]{2}$")
+
+
+def _pick_region(query: str, region: str | None) -> str:
+    """Явный регион модели, иначе по алфавиту запроса (ru-ru / us-en)."""
+    reg = (region or "").strip().lower()
+    if _REGION_RE.match(reg) or reg == "wt-wt":
+        return reg
+    return "ru-ru" if _CYRILLIC_RE.search(query) else "us-en"
+
+
+def _ddgs_call(query: str, *, news: bool, region: str, timelimit: str | None, limit: int):
+    from ddgs import DDGS
+
+    client = DDGS(timeout=SEARCH_TIMEOUT)
+    kwargs = {"region": region, "max_results": limit}
+    if timelimit:
+        kwargs["timelimit"] = timelimit
+    return list(client.news(query, **kwargs) if news else client.text(query, **kwargs))
+
+
+def web_search(
+    query: str,
+    max_results: int = 5,
+    *,
+    region: str | None = None,
+    timelimit: str | None = None,
+    news: bool | None = None,
+) -> str:
+    """Поиск в интернете через DuckDuckGo.
+
+    `region` — `ru-ru` / `us-en` / … (по умолчанию по алфавиту запроса);
+    `timelimit` — `d` день / `w` неделя / `m` месяц / `y` год;
+    `news` — лента новостей (по умолчанию включается на «новости»/«news»).
+    """
     query = (query or "").strip()
     if not query:
         return "Ошибка: пустой поисковый запрос."
 
     try:
-        from ddgs import DDGS
+        import ddgs  # noqa: F401
     except ImportError:
         return "Ошибка: пакет ddgs не установлен. Выполните: pip install ddgs"
 
-    try:
-        results = list(DDGS().text(query, max_results=max_results))
-    except Exception as exc:  # noqa: BLE001
-        return f"Ошибка поиска: {exc}"
+    tl = (timelimit or "").strip().lower() or None
+    if tl not in _TIMELIMITS:
+        tl = None
+    use_news = bool(_NEWS_RE.search(query)) if news is None else bool(news)
+    reg = _pick_region(query, region)
+    limit = max(1, min(int(max_results or 5), 10))
 
+    results: list[dict] = []
+    error: Exception | None = None
+    modes = [True, False] if use_news else [False]
+    for mode in modes:
+        try:
+            results = _ddgs_call(query, news=mode, region=reg, timelimit=tl, limit=limit)
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+            continue
+        if results:
+            use_news = mode
+            break
     if not results:
+        if error is not None:
+            return f"Ошибка поиска: {error}"
         return f"По запросу «{query}» ничего не найдено."
 
-    lines = [f"Результаты поиска по «{query}»:"]
+    kind = "Новости" if use_news else "Результаты поиска"
+    scope = f" [{reg}" + (f", за {tl}" if tl else "") + "]"
+    lines = [f"{kind} по «{query}»{scope}:"]
     for i, item in enumerate(results, 1):
         title = item.get("title") or "(без названия)"
-        href = item.get("href") or ""
+        href = item.get("href") or item.get("url") or ""
         body = item.get("body") or ""
-        lines.append(f"{i}. {title}\n   URL: {href}\n   {body}")
+        meta = " · ".join(
+            str(x) for x in (item.get("source"), item.get("date")) if x
+        )
+        lines.append(
+            f"{i}. {title}" + (f" ({meta})" if meta else "") + f"\n   URL: {href}\n   {body}"
+        )
     return "\n".join(lines)
 
 
@@ -165,8 +269,9 @@ def fetch_url(url: str, max_chars: int = 4000) -> str:
                 x in ctype for x in ("text/", "html", "xml", "json", "javascript")
             ):
                 return f"Пропуск {url}: нетекстовый Content-Type ({ctype})"
-            charset = resp.headers.get_content_charset() or "utf-8"
+            header_charset = resp.headers.get_content_charset()
             raw = resp.read(max_bytes)
+            charset = _detect_charset(header_charset, raw)
     except urllib.error.HTTPError as exc:
         return f"HTTP ошибка {exc.code} при загрузке {url}"
     except Exception as exc:  # noqa: BLE001
@@ -177,15 +282,7 @@ def fetch_url(url: str, max_chars: int = 4000) -> str:
     except LookupError:
         html = raw.decode("utf-8", errors="replace")
 
-    parser = _TextExtractor()
-    try:
-        parser.feed(html)
-    except Exception:  # noqa: BLE001
-        text = re.sub(r"<[^>]+>", " ", html)
-    else:
-        text = parser.text()
-
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    text = _extract_text(html).strip()
     if len(text) > max_chars:
         text = text[:max_chars] + "\n...[обрезано]"
     if not text:
@@ -209,7 +306,20 @@ TOOLS = [
                     "query": {
                         "type": "string",
                         "description": "Короткий поисковый запрос на русском или английском",
-                    }
+                    },
+                    "timelimit": {
+                        "type": "string",
+                        "enum": ["d", "w", "m", "y"],
+                        "description": "Свежесть: d — сутки, w — неделя, m — месяц, y — год. Для новостей/цен/курсов.",
+                    },
+                    "news": {
+                        "type": "boolean",
+                        "description": "true — искать в новостных лентах (события, заголовки)",
+                    },
+                    "region": {
+                        "type": "string",
+                        "description": "Регион, например ru-ru, us-en, de-de (по умолчанию по языку запроса)",
+                    },
                 },
                 "required": ["query"],
             },
@@ -238,6 +348,11 @@ TOOLS = [
 ]
 
 TOOL_IMPL = {
-    "web_search": lambda args: web_search(args.get("query", "")),
+    "web_search": lambda args: web_search(
+        args.get("query", ""),
+        region=args.get("region"),
+        timelimit=args.get("timelimit"),
+        news=args.get("news"),
+    ),
     "fetch_url": lambda args: fetch_url(args.get("url", "")),
 }

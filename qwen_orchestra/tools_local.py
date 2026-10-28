@@ -98,6 +98,12 @@ def local_context_block() -> str:
     )
 
 
+def local_date_line() -> str:
+    """Короткая строка с датой/временем для system воркера (~30 токенов)."""
+    snap = local_datetime_snapshot()
+    return f"Сейчас по часам ПК: {snap['human_ru']} ({snap['timezone']})."
+
+
 def get_local_time(_args: dict | None = None) -> str:
     """Ollama tool: текущие дата и время с ПК."""
     del _args

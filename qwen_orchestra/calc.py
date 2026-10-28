@@ -10,6 +10,7 @@ import re
 MAX_EXPR_CHARS = 400
 MAX_AST_NODES = 200
 MAX_ABS_VALUE = 1e308
+MAX_ABS_INT = 10**308
 MAX_POW_EXP = 64
 MAX_FACTORIAL = 170
 
@@ -155,7 +156,9 @@ TOOLS_CALC = [
 ]
 
 
-def format_number(value: float) -> str:
+def format_number(value: float | int) -> str:
+    if isinstance(value, int):
+        return str(value)
     if not math.isfinite(value):
         return str(value)
     if abs(value - round(value)) < 1e-12:
@@ -172,22 +175,27 @@ def _count_nodes(node: ast.AST) -> int:
     return sum(1 for _ in ast.walk(node))
 
 
-def _check_finite(value: float) -> float:
+def _check_finite(value: float | int) -> float | int:
+    """Целые остаются точными (int), дробные — float."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise ValueError("not a number")
+    if isinstance(value, int):
+        if abs(value) > MAX_ABS_INT:
+            raise ValueError("overflow")
+        return value
     num = float(value)
     if not math.isfinite(num) or abs(num) > MAX_ABS_VALUE:
         raise ValueError("overflow")
     return num
 
 
-def _eval_node(node: ast.AST) -> float:
+def _eval_node(node: ast.AST) -> float | int:
     if isinstance(node, ast.Expression):
         return _eval_node(node.body)
     if isinstance(node, ast.Constant):
         if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
             raise ValueError("not a number")
-        return _check_finite(float(node.value))
+        return _check_finite(node.value)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         value = _eval_node(node.operand)
         return value if isinstance(node.op, ast.UAdd) else _check_finite(-value)
@@ -195,6 +203,14 @@ def _eval_node(node: ast.AST) -> float:
         left, right = _eval_node(node.left), _eval_node(node.right)
         if isinstance(node.op, ast.Pow) and (abs(right) > MAX_POW_EXP or abs(left) > 1e6):
             raise ValueError("pow too big")
+        if (
+            isinstance(node.op, ast.Div)
+            and isinstance(left, int)
+            and isinstance(right, int)
+            and right != 0
+            and left % right == 0
+        ):
+            return _check_finite(left // right)
         return _check_finite(_OPS[type(node.op)](left, right))
     if isinstance(node, ast.Name):
         key = node.id.lower()
@@ -218,7 +234,7 @@ def _eval_node(node: ast.AST) -> float:
             args = [int(args[0])]
         if name == "round" and len(args) == 2:
             args = [args[0], int(args[1])]
-        return _check_finite(float(impl(*args)))
+        return _check_finite(impl(*args))
     raise ValueError("unsupported expression")
 
 
@@ -232,6 +248,12 @@ def preprocess(raw: str) -> str:
     expr = re.sub(r"\bминус\b", "-", expr, flags=re.IGNORECASE)
     expr = re.sub(r"\b(?:умножить(?:\s+на)?)\b", "*", expr, flags=re.IGNORECASE)
     expr = re.sub(r"\b(?:разделить(?:\s+на)?|делить(?:\s+на)?)\b", "/", expr, flags=re.IGNORECASE)
+    # «200 - 10%» → скидка/наценка от первого числа (как в калькуляторах)
+    expr = re.sub(
+        rf"^\s*({_NUM})\s*([+-])\s*({_NUM})%\s*$",
+        r"\1*(1\2\3/100)",
+        expr,
+    )
     expr = re.sub(r"(\d+(?:\.\d+)?)%\s*(?:от|of)\s*", r"(\1/100)*", expr, flags=re.IGNORECASE)
     expr = re.sub(r"(\d+(?:\.\d+)?)%", r"(\1/100)", expr)
     expr = re.sub(r"(\d+),(\d+)", r"\1.\2", expr)
@@ -239,7 +261,7 @@ def preprocess(raw: str) -> str:
     return expr
 
 
-def eval_numeric(raw: str) -> float:
+def eval_numeric(raw: str) -> float | int:
     expr = preprocess(raw)
     if not expr or len(expr) > MAX_EXPR_CHARS:
         raise ValueError("bad length")
@@ -249,7 +271,7 @@ def eval_numeric(raw: str) -> float:
     return _eval_node(tree)
 
 
-def try_eval(raw: str) -> float | None:
+def try_eval(raw: str) -> float | int | None:
     try:
         return eval_numeric(raw)
     except (

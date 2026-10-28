@@ -106,6 +106,8 @@ class RouteDecision:
     reply: str = ""
     need_local_time: bool = False
     need_calc: bool = False
+    # время решает сама модель воркера (tool get_local_time), без вызова tiny
+    time_by_model: bool = False
 
 
 from .router_detect import (  # noqa: E402
@@ -304,8 +306,9 @@ def route(user_text: str) -> RouteDecision:
             need_calc=calc,
         )
 
-    # Нужны ли часы ПК — только решение tiny (отдельный вызов)
-    local = need_local_time(user_text)
+    # Часы ПК: отдельный вызов tiny только когда floor=tiny (иначе лишняя загрузка
+    # 0.8b на 8 ГБ). Для mid+ воркер и так получает короткую строку с датой.
+    local = need_local_time(user_text) if floor == "tiny" else False
     if floor == "coder":
         return RouteDecision(
             True, "coder", False, "floor:coder", "", need_local_time=local, need_calc=calc

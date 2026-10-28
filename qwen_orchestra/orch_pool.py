@@ -147,11 +147,23 @@ def _fit_tier(tier: Tier, available: set[Tier]) -> Tier:
     return next(iter(available))
 
 
+def _is_coder_entry(entry: dict[str, Any]) -> bool:
+    return (entry.get("tier") or "") == "coder" or "coder" in str(
+        entry.get("model") or ""
+    ).lower()
+
+
 def _next_entry_by_rank(
     current: dict[str, Any],
     available_entries: list[dict[str, Any]],
+    *,
+    code_task: bool = False,
 ) -> dict[str, Any] | None:
-    """Следующая routed-модель с rank строго выше текущей."""
+    """Следующая routed-модель с rank строго выше текущей.
+
+    Специализация: не-кодовый запрос на coder не эскалируем; кодовый — сначала
+    на coder (если он сильнее текущей модели).
+    """
     cur_rank = _pool_rank(current)
     routed = [
         e
@@ -159,6 +171,11 @@ def _next_entry_by_rank(
         if (e.get("tier") or "").strip() and (e.get("model") or "").strip()
     ]
     stronger = [e for e in routed if _pool_rank(e) > cur_rank]
+    if not code_task:
+        stronger = [e for e in stronger if not _is_coder_entry(e)]
+    else:
+        coders = [e for e in stronger if _is_coder_entry(e)]
+        stronger = coders or stronger
     if not stronger:
         return None
     return min(stronger, key=lambda e: (_pool_rank(e), str(e.get("id") or "")))

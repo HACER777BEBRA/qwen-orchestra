@@ -38,6 +38,7 @@
 | `qwen_orchestra/router.py` | `route()`, SYSTEM; floor/web/meaningful в `router_detect.py` |
 | `qwen_orchestra/selfcheck.py` | Самопроверка ответа; `HINTS` / `SEVERITY` в `selfcheck_hints.py` |
 | `qwen_orchestra/llm.py` | Клиент Ollama + OpenRouter (`provider`, `think: false` для Qwen3.5) |
+| `qwen_orchestra/llm_stream_tools.py` | Стрим вместе с tools (Ollama / OpenRouter): токены + собранные `tool_calls` |
 | `qwen_orchestra/metrics.py` | CPU/RAM/GPU/температуры + Ollama `/api/ps` |
 | `qwen_orchestra/tools_web.py` | `web_search`, `fetch_url` |
 | `qwen_orchestra/tools_local.py` | локальные данные ПК: `get_local_time`, снимок даты/времени |
@@ -91,7 +92,7 @@ Bootstrap ленивый (`ensure_bootstrapped` / `Client.__init__`), не пр�
 - **`tier` задан** → Auto и эскалация; несколько моделей на один тир — ответ с max rank.
 - **`tier` пуст** → только ручной выбор (`force_model`).
 - Поле `provider`: `ollama` (default) | `openrouter`.
-- Worker ходит в OpenRouter chat/completions (stream); **tools пока только на Ollama**.
+- Worker ходит в OpenRouter chat/completions; **tools** (OpenAI `tool_calls`, `role: tool` + `tool_call_id`) работают и со стримом финального ответа — как на Ollama. Если модель не поддерживает tools (OR: ошибка с «tool»; Ollama: HTTP 400 «does not support tools», например `gemma3`), воркер откатывается на ответ без tools с предрасчётом/`CALCULATE:`.
 - Роутер и selfcheck остаются локальными (tiny/mid).
 - Availability: ключ задан → OR-модель доступна; иначе missing (`openrouter:…`).
 - API: `PUT /api/settings/providers/openrouter` `{ "api_key": "…" }` / `{ "clear": true }`.
@@ -116,6 +117,14 @@ user → route → need_plan? → (planner → шаги → compose) | worker (�
 - События `on_status`: `route`, `plan`, `plan_ready`, `plan_accepted`, `plan_rejected`, `plan_step`, `plan_token`, `plan_step_done`, `compose`, `context`, `worker`, `tool`, `selfcheck`, `retry`, `restore`. В каждом payload — `elapsed_ms` (от старта `handle`) и `dt_ms` (от прошлого события).
 - `force_model` — id записи пула; `force_tier` — лучшая available-модель тира (compat). Ручной `force_model` **без плана**.
 - `OrchestraResult`: `text`, `tier`, `model`, `need_web`, `need_local_time`, `need_calc`, `route_reason`, `escalated`, `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason`, `gen`, `planned`, `plan_goal`, `plan_steps`, `elapsed_ms` (метаданные — от **выбранной** попытки / сборки; `gen` — применённый сэмплинг воркера; в `plan_steps` для UI могут быть `prompt`/`text`).
+
+## Картинки (vision как предобработка)
+
+- Вложение: скрепка / Ctrl+V / drag&drop в composer; до `vision.MAX_IMAGES` (4), JPEG/PNG/WebP/GIF/BMP, исходник ≤12 МБ.
+- `SendMessageBody.images: [{name, data}]` (base64 или data-URL). Сервер вызывает `vision.prepare_images`: EXIF-поворот; если большая сторона > `MAX_SIDE` (1280), файл > `RECOMPRESS_BYTES` (1.5 МБ) или формат не JPEG/PNG — уменьшение и JPEG q85 (прозрачность → белый фон). Мелкие JPEG/PNG уходят как есть. В `meta.images` user-сообщения — превью и размеры.
+- `handle(..., images=[b64])` / `Client.ask(images=[Path|bytes|str])`: **vision-модель только расшифровывает** картинку (`orch_vision.describe_images`, temperature=0, ≤700 токенов, событие `vision`), а описание добавляется в `system_extra` обычного воркера. Дальше — обычный оркестр (роутер на тексте вопроса, воркер, selfcheck, retry); основная модель сама решает, что делать с описанием. Пустой текст → «Опиши, что изображено на картинке». План при картинках отключён, tiny-shortcut тоже.
+- Vision-модель: доступная запись пула (`vision.is_vision_model`: gemma3 ≥4b, llava, qwen2.5vl, …; локальная раньше OpenRouter, больший rank) → любая установленная Ollama-модель; иначе ошибка «ollama pull gemma3:4b». `force_model` относится к основной модели.
+- Сервер сохраняет описание в `meta.vision_text` user-сообщения и подставляет его в историю модели — follow-up без повторного прикрепления работает. `OrchestraResult.image_context` / `vision_model`; SSE `meta.phase="vision"`; чип «👁 модель».
 
 ## Auto-режим: когда какая модель
 
@@ -145,15 +154,18 @@ user → route → need_plan? → (planner → шаги → compose) | worker (�
 - `need_web` — детерминированно (`need_web()` / hard+soft ключи, в т.ч. «поищи»,
   «погугли»); при `force_tier` / `force_model` LLM-роутер **не** вызывается.
   Вместе с поиском в system воркера **всегда** снимок часов ПК (`need_local_time`).
-- `need_local_time` — tiny (`need_local_time()` / JSON-классификатор), без regex,
+- Воркер **всегда** получает в system короткую строку «Сейчас по часам ПК: …» (`tools_local.local_date_line`, ~30 токенов).
+- При `force_model` / `force_tier` tiny не зовётся: воркеру (Ollama/OpenRouter) отдаётся tool `get_local_time` (`RouteDecision.time_by_model`) — нужность времени решает сама модель ; строка с датой в system — всегда.
+- `need_local_time` — tiny (`need_local_time()` / JSON-классификатор) **только при floor=tiny** (для mid+ отдельный вызов tiny не делается), без regex,
   **либо** автоматически при `need_web`. Критерий tiny широкий: любое упоминание
   времени/даты/«сейчас» → true. При true в system — снимок часов/даты/TZ с ПК
   (`tools_local`); чип UI «время ПК».
 - `need_calc` — детерминированно (`calc.need_calc`): «посчитай/вычисли», сложный процент /
   аннуитет, выражение с `+ * / **` или минусом **с пробелами**, проценты, два+ числа
   со «сколько». Если `pick_formula` видит выражение — CPU сразу (`calc-direct`), без плана;
-  иначе план с блоком «Формула» + «Счёт ПК». Чип UI «счёт ПК». Без tools (OpenRouter) —
+  иначе план с блоком «Формула» + «Счёт ПК». Чип UI «счёт ПК». Без tools (фолбэк OpenRouter) —
   предрасчёт или строка `CALCULATE:`. Модель не считает в уме.
+- Tools воркера: ответ стримится (`llm_stream_tools.chat_stream_tools`; начало до 120 симв. удерживается в `_TokenGate`, чтобы преамбула «сейчас поищу…» и `SEARCH:` не попали в UI; без стрима при `need_calc`). Вызовы одного раунда выполняются параллельно, в `role: tool` передаётся `tool_name`. `calculate` держит целые точными (`int`, без научной записи), `200 - 10%` = `200*(1-10/100)`. `web_search`: таймаут 10 с, `region` (по умолчанию `ru-ru` для кириллицы, иначе `us-en`), `timelimit` `d|w|m|y`, `news` (авто на «новости»/«news», при пустой ленте — фолбэк на обычный поиск). `fetch_url` берёт кодировку из `<meta charset>`, пропускает `nav/header/footer/aside/form` и предпочитает `<main>`/`<article>`.
 - `ok=false` от tiny **игнорируется**, если запрос осмысленный (`looks_meaningful`):
   есть слова с гласными или простая арифметика. Пустой ввод и «??» отклоняются сразу,
   мусор — после второго мнения mid (4b).
@@ -192,8 +204,8 @@ user → route → need_plan? → (planner → шаги → compose) | worker (�
 База (токены):
 
 ```
-base = ceil_256(tokens(промпт) + template(128) + reserve_ответа + safety)
-num_ctx = min(ceiling, max(256, ceil_256(base * (1 + ctx_overhead_pct/100))))
+base = ceil_256(tokens(промпт + tools + local_context + retry) + template(128) + reserve_ответа + safety)
+num_ctx = min(ceiling, snap_step(ceil_256(base * (1 + ctx_overhead_pct/100))))   # snap_step: 2048 / 4096 / 8192
 ```
 
 | Кусок | Значение |
@@ -203,6 +215,8 @@ num_ctx = min(ceiling, max(256, ceil_256(base * (1 + ctx_overhead_pct/100))))
 | `reserve_ответа` | 512 короткий (< 48 символов) / 768 обычный / 1536 код (`coder` или признаки кода) |
 | `safety` | `max(128, ~10% от суммы трёх кусков выше)` |
 | `ceil_256` | выравнивание как в llama.cpp |
+| `snap_step` | округление вверх до ступени `CTX_STEPS` (2048/4096/8192): меньше перезагрузок модели в Ollama |
+| tools | токены JSON-схем tools + резерв под результаты (`CTX_TOOL_RESULTS_WEB` 1800 при web, `CTX_TOOL_RESULTS_CALC` 300 при счёте), а также `local_context` и `retry_hint` |
 | `ctx_overhead_pct` | поле записи пула `0…900`; `0` = как база; `300` → база×4 |
 | `ceiling` | `max_ctx` модели или глобальный `8192` (`NUM_CTX_MAX`); clamp [256…8192] |
 
@@ -230,7 +244,7 @@ max ctx tiny/nano/small `4096`, остальные без потолка (8192).
 
 1. **Быстрые правила** (без модели):
    `cjk` (ушёл в иероглифы), `language` (не язык вопроса), `empty`, `too_short`,
-   `refusal`, `uncertain`, `repetition` (зацикливание), `truncated` (незакрытый ```).
+   `refusal`, `uncertain`, `repetition` (зацикливание), `truncated` (незакрытый ``` **или** `done_reason`/`finish_reason` = `length`). Обрыв по длине → один повтор на **той же** модели с окном на ступень шире (и `num_predict`×2, если задан), без эскалации.
    `refusal` / `uncertain` **по умолчанию включены** (короткий ответ с «не могу» /
    «не знаю» → retry). Настройка в `settings.json` → `selfcheck` или UI «Модели и промпты»:
    `flag_refusal` / `flag_uncertain` / `flag_irrelevant` (bool) и опционально свои
@@ -245,10 +259,23 @@ max ctx tiny/nano/small `4096`, остальные без потолка (8192).
 3. **LLM-ревью**, если предыдущее прошло и есть куда эскалировать:
    `irrelevant`, `error`, `incomplete`. Ревьюер — та же Ollama-модель, что воркер,
    если её тир ≥ mid (без выгрузки 9b ради 4b); иначе mid из пула.
-   `num_ctx` ревьюера — 4096. При сбое ревьюера `ok=true`, но `checked=false`
+   `num_ctx` ревьюера — окно, с которым модель уже загружена (`llm.loaded_num_ctx` → `/api/ps`), иначе 4096. При сбое ревьюера `ok=true`, но `checked=false`
    (`note=review-error`). На последней попытке (нет старшей модели) — только правила.
 
-Не прошло → запрос **переделывается** на модели уровнем выше, до `MAX_ATTEMPTS`
+Действие при провале зависит от типа проблемы (`SAME_MODEL_FIX` в `selfcheck_hints.py`):
+
+| Проблема | Действие |
+|---|---|
+| `cjk` / `language` / `repetition` | повтор на **той же** модели: подсказка, `temperature`−0.2, `repeat_penalty` ≥1.15 (1.25 для repetition) |
+| `truncated` (в т.ч. `done_reason=length`) | та же модель, окно на ступень шире, `num_predict`×2 |
+| `incomplete` | та же модель, прошлый ответ в system (`RETRY_COMPLETE_SYSTEM`: «допиши недостающее») |
+| `error` / `irrelevant` / `refusal` / `empty` / `too_short` / `uncertain` | эскалация на модель с большим rank |
+
+Повтор «на месте» — один раз на запись пула; повторная проблема → эскалация.
+Специализация при эскалации (`_next_entry_by_rank(code_task=…)`): не-кодовый запрос на `coder` не уходит;
+кодовый (`coder` как старт, код/``` в запросе, `tier_floor=coder`) эскалирует сначала на `coder`.
+
+Не прошло → запрос **переделывается** (см. таблицу; эскалация — на модель уровнем выше), до `MAX_ATTEMPTS`
 (по умолчанию 3). Правка (`Verdict.hint`) идёт в **system** (`RETRY_SYSTEM`), а не
 в текст пользователя — иначе модель извиняется вместо ответа.
 Web-tool результаты **кэшируются** между retry (повторный поиск не делается).

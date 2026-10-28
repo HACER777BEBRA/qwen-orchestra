@@ -23,7 +23,13 @@ HINTS: dict[str, str] = {
     "incomplete": "Прошлый ответ отвечал лишь частично. Закрой все части вопроса.",
 }
 
-SEVERITY: dict[str, int] = {
+# Проблемы, которые чинятся параметрами/подсказкой на той же модели;
+# всё остальное (error / irrelevant / refusal / empty / …) — эскалация.
+SAME_MODEL_FIX: frozenset[str] = frozenset(
+    {"cjk", "language", "repetition", "truncated", "incomplete"}
+)
+
+SEVERITY: dict[str, int][str, int] = {
     "empty": 5,
     "cjk": 4,
     "language": 4,

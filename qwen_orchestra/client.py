@@ -16,6 +16,7 @@ from .orchestra import (
 )
 from .router import RouteDecision, Tier, route as route_fn
 from .selfcheck import Verdict
+from .vision import prepare_images
 
 StatusCallback = Callable[[str, dict[str, Any]], None]
 TokenCallback = Callable[[str], None]
@@ -130,8 +131,13 @@ class Client:
         keep_alive: str | None = None,
         allow_plan: bool = True,
         on_plan_confirm: Callable[[dict[str, Any]], str] | None = None,
+        images: list[bytes | str | Path] | None = None,
     ) -> OrchestraResult:
         """Полный цикл оркестра. По умолчанию без print в stdout.
+
+        ``images`` — картинки (путь, байты или base64/data-URL; до ``vision.MAX_IMAGES``):
+        слишком крупные сжимаются, vision-модель (gemma3, llava, …) переводит их в текст,
+        описание добавляется в контекст основной модели (план при картинках отключён).
 
         Сэмплинг воркера: ``temperature`` / ``gen=GenOptions(...)`` и соседние
         параметры (``top_p``, ``seed``, ``num_predict``, …). Роутер, планировщик
@@ -140,9 +146,20 @@ class Client:
         ``on_plan_confirm`` — колбэк утверждения плана (``approve`` / ``reject``);
         без него план выполняется сразу.
         """
+        prepared = (
+            [
+                p.b64
+                for p in prepare_images(
+                    [Path(i).read_bytes() if isinstance(i, Path) else i for i in images]
+                )
+            ]
+            if images
+            else None
+        )
         return handle(
             user_text,
             history,
+            images=prepared,
             force_tier=force_tier,
             force_model=force_model,
             stream=stream,
